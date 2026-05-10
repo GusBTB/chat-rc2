@@ -1,0 +1,2758 @@
+1. Visão geral da arquitetura
+O projeto pode ser pensado em camadas:
+┌──────────────────────────────────────────────┐
+│ Cliente Console                              │
+│ - Lê comandos do usuário                     │
+│ - Envia comandos ao servidor                 │
+│ - Recebe mensagens em thread separada        │
+└──────────────────────────────────────────────┘
+                    │ TCP
+                    ▼
+┌──────────────────────────────────────────────┐
+│ Servidor TCP                                 │
+│ - Aceita múltiplos clientes                  │
+│ - Cria uma thread para cada cliente          │
+│ - Encaminha comandos para o núcleo           │
+└──────────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────┐
+│ Núcleo da Aplicação                          │
+│ - Login/logout                               │
+│ - Usuários                                   │
+│ - Mensagens privadas                         │
+│ - Grupos                                     │
+│ - Bloqueios                                  │
+│ - Convites e aceite                          │
+│ - Mensagens offline                          │
+└──────────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────┐
+│ Persistência SQLite                          │
+│ - users                                      │
+│ - messages                                   │
+│ - groups                                     │
+│ - group_members                              │
+│ - blocks                                     │
+│ - direct_permissions                         │
+│ - pending_requests                           │
+└──────────────────────────────────────────────┘
+
+A regra mais importante é: não misturar regra de negócio com socket.
+O socket apenas transporta texto entre cliente e servidor. Quem decide se uma mensagem pode ser enviada, se o usuário está bloqueado, se está online ou se deve receber depois é o núcleo do sistema.
+
+2. Estrutura inicial do projeto
+Uma estrutura simples pode ser:
+chat-socket-java/
+│
+├── src/
+│   └── main/
+│       └── java/
+│           └── br/
+│               └── edu/
+│                   └── chat/
+│                       ├── MainServer.java
+│                       ├── MainClient.java
+│                       │
+│                       ├── server/
+│                       │   ├── ChatServer.java
+│                       │   ├── ClientHandler.java
+│                       │   └── ClientSessionManager.java
+│                       │
+│                       ├── client/
+│                       │   ├── ChatClient.java
+│                       │   ├── ConsoleInputThread.java
+│                       │   └── ServerListenerThread.java
+│                       │
+│                       ├── core/
+│                       │   ├── ChatService.java
+│                       │   ├── UserService.java
+│                       │   ├── GroupService.java
+│                       │   ├── MessageService.java
+│                       │   └── CommandProcessor.java
+│                       │
+│                       ├── model/
+│                       │   ├── User.java
+│                       │   ├── Group.java
+│                       │   ├── Message.java
+│                       │   ├── UserStatus.java
+│                       │   └── PendingRequest.java
+│                       │
+│                       ├── repository/
+│                       │   ├── Database.java
+│                       │   ├── UserRepository.java
+│                       │   ├── GroupRepository.java
+│                       │   ├── MessageRepository.java
+│                       │   ├── BlockRepository.java
+│                       │   └── RequestRepository.java
+│                       │
+│                       └── protocol/
+│                           ├── ClientCommand.java
+│                           ├── ServerResponse.java
+│                           └── CommandParser.java
+│
+├── database/
+│   └── chat.db
+│
+├── docs/
+│   └── documentacao.md
+│
+└── README.md
+
+Caso o professor permita Maven, use Maven para facilitar o SQLite:
+<dependency>
+    <groupId>org.xerial</groupId>
+    <artifactId>sqlite-jdbc</artifactId>
+    <version>3.46.1.0</version>
+</dependency>
+
+Sem Maven, será necessário baixar o .jar do SQLite JDBC e adicioná-lo ao classpath.
+
+3. Etapa 1 — Criar o banco SQLite
+Antes de pensar no socket, crie o banco de dados.
+3.1 Tabelas principais
+Sugestão inicial:
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT NOT NULL,
+    login TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OFFLINE',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    blocker_user_id INTEGER NOT NULL,
+    blocked_user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(blocker_user_id, blocked_user_id),
+    FOREIGN KEY(blocker_user_id) REFERENCES users(id),
+    FOREIGN KEY(blocked_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS direct_permissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    requester_user_id INTEGER NOT NULL,
+    target_user_id INTEGER NOT NULL,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(requester_user_id, target_user_id),
+    FOREIGN KEY(requester_user_id) REFERENCES users(id),
+    FOREIGN KEY(target_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS groups_chat (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_by_user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    joined_at TEXT NOT NULL,
+    UNIQUE(group_id, user_id),
+    FOREIGN KEY(group_id) REFERENCES groups_chat(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_user_id INTEGER NOT NULL,
+    receiver_user_id INTEGER,
+    group_id INTEGER,
+    content TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(sender_user_id) REFERENCES users(id),
+    FOREIGN KEY(receiver_user_id) REFERENCES users(id),
+    FOREIGN KEY(group_id) REFERENCES groups_chat(id)
+);
+
+CREATE TABLE IF NOT EXISTS message_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    receiver_user_id INTEGER NOT NULL,
+    delivered INTEGER NOT NULL DEFAULT 0,
+    delivered_at TEXT,
+    FOREIGN KEY(message_id) REFERENCES messages(id),
+    FOREIGN KEY(receiver_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS pending_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_type TEXT NOT NULL,
+    requester_user_id INTEGER NOT NULL,
+    target_user_id INTEGER,
+    group_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(requester_user_id) REFERENCES users(id),
+    FOREIGN KEY(target_user_id) REFERENCES users(id),
+    FOREIGN KEY(group_id) REFERENCES groups_chat(id)
+);
+
+3.2 Enum de status
+No Java:
+public enum UserStatus {
+    ONLINE,
+    OFFLINE,
+    OCUPADO,
+    AUSENTE
+}
+
+Regra do projeto:
+Apenas usuários ONLINE recebem mensagens imediatamente.
+Usuários OFFLINE, OCUPADO ou AUSENTE recebem depois, quando ficarem ONLINE.
+
+3.3 Testes de aceite da Etapa 1
+Antes de continuar, teste:
+[ ] O banco chat.db é criado.
+[ ] As tabelas são criadas sem erro.
+[ ] É possível inserir um usuário manualmente.
+[ ] É possível impedir dois usuários com mesmo login.
+[ ] É possível impedir dois usuários com mesmo email.
+[ ] É possível consultar usuários cadastrados.
+
+
+4. Etapa 2 — Criar os modelos Java
+Crie classes simples para representar os dados principais.
+4.1 Classe User
+public class User {
+    private int id;
+    private String fullName;
+    private String login;
+    private String email;
+    private String password;
+    private UserStatus status;
+
+    // construtores, getters e setters
+}
+
+4.2 Classe Group
+public class Group {
+    private int id;
+    private String name;
+    private int createdByUserId;
+
+    // construtores, getters e setters
+}
+
+4.3 Classe Message
+public class Message {
+    private int id;
+    private int senderUserId;
+    private Integer receiverUserId;
+    private Integer groupId;
+    private String content;
+    private String messageType;
+    private String createdAt;
+
+    // construtores, getters e setters
+}
+
+Tipos úteis de mensagem:
+DIRECT
+GROUP
+GROUP_DIRECT
+SYSTEM
+INVITE
+REQUEST
+
+4.4 Testes de aceite da Etapa 2
+[ ] O projeto compila.
+[ ] É possível criar objetos User, Group e Message.
+[ ] O enum UserStatus funciona.
+[ ] Nenhuma classe de modelo depende de socket, console ou banco diretamente.
+
+
+5. Etapa 3 — Criar a camada de persistência
+Crie uma classe Database responsável por abrir conexão com SQLite.
+public class Database {
+    private static final String URL = "jdbc:sqlite:database/chat.db";
+
+    public static Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(URL);
+    }
+}
+
+Depois crie repositórios.
+5.1 UserRepository
+Responsabilidades:
+- create(User user)
+- findByLogin(String login)
+- findByEmail(String email)
+- findById(int id)
+- listAll()
+- listOnline()
+- updateStatus(int userId, UserStatus status)
+- existsLogin(String login)
+- existsEmail(String email)
+
+5.2 GroupRepository
+Responsabilidades:
+- createGroup(String name, int creatorId)
+- findByName(String name)
+- listGroups()
+- addMember(int groupId, int userId, boolean admin)
+- removeMember(int groupId, int userId)
+- listMembers(int groupId)
+- listAdmins(int groupId)
+- isMember(int groupId, int userId)
+- isAdmin(int groupId, int userId)
+- makeAdmin(int groupId, int userId)
+
+5.3 MessageRepository
+Responsabilidades:
+- saveMessage(...)
+- saveDelivery(...)
+- listPendingDeliveriesForUser(int userId)
+- markDelivered(int deliveryId)
+
+5.4 BlockRepository
+Responsabilidades:
+- blockUser(int blockerId, int blockedId)
+- unblockUser(int blockerId, int blockedId)
+- isBlockedBetween(int userA, int userB)
+
+A regra deve considerar bloqueio nos dois sentidos:
+Se A bloqueou B:
+- B não envia mensagem direta para A.
+- A também não envia mensagem direta para B.
+- Mensagens de grupo de B não chegam para A.
+- Mensagens de grupo de A não chegam para B.
+
+5.5 Testes de aceite da Etapa 3
+Faça uma classe temporária RepositoryTestMain.
+[ ] Cadastrar usuário no banco.
+[ ] Buscar usuário por login.
+[ ] Alterar status para ONLINE.
+[ ] Criar grupo.
+[ ] Inserir criador como administrador.
+[ ] Listar grupos.
+[ ] Listar usuários online.
+[ ] Criar bloqueio entre dois usuários.
+[ ] Verificar se bloqueio impede relação entre A e B.
+[ ] Salvar mensagem pendente.
+[ ] Consultar mensagens pendentes de um usuário.
+
+
+6. Etapa 4 — Definir o protocolo textual
+Como o projeto é via console, é importante definir os comandos aceitos.
+6.1 Comandos de usuário
+Sugestão:
+cadastro;Nome Completo;login;email;senha
+login;login;senha
+logout
+recuperarsenha;email
+status;ONLINE
+status;OCUPADO
+status;AUSENTE
+
+6.2 Comandos de listagem
+listausuarios
+listagrupos
+listargrupo &nomegrupo
+
+6.3 Mensagem direta
+Formato exigido:
+@robson: como vc vai?
+
+Interpretação:
+destinatário = robson
+conteúdo = como vc vai?
+
+6.4 Criar grupo
+novogrupo nomegrupo
+
+6.5 Inserir usuário em grupo
+inserir &nomegrupo@usuario
+inserir &nomegrupo@usuario1,@usuario2
+
+6.6 Entrar em grupo existente
+entrar &nomegrupo
+
+6.7 Mensagem para grupo todo
+Sugestão:
+&nomegrupo: mensagem para todos
+
+6.8 Mensagem direta dentro do grupo
+&nomegrupo@robson: olá, como vc vai robson
+&nomegrupo@robson,@siscoutto: olá galera
+
+6.9 Bloqueio
+Sugestão:
+bloquear @usuario
+desbloquear @usuario
+
+6.10 Sair do grupo
+sair &nomegrupo
+
+Ou, caso o usuário esteja em um modo específico de grupo, apenas:
+sair
+
+Mas para console simples, recomendo usar:
+sair &nomegrupo
+
+Fica menos ambíguo.
+6.11 Aceite ou recusa de convites
+Como várias situações exigem confirmação, use comandos com identificador:
+aceitar 15
+recusar 15
+
+Exemplo de mensagem enviada pelo servidor:
+[CONVITE 15] O usuário joao quer conversar em privado com você. Digite: aceitar 15 ou recusar 15
+
+Isso evita confusão caso o usuário receba vários convites ao mesmo tempo.
+6.12 Testes de aceite da Etapa 4
+[ ] Parser identifica login.
+[ ] Parser identifica cadastro.
+[ ] Parser identifica @usuario: mensagem.
+[ ] Parser identifica &grupo: mensagem.
+[ ] Parser identifica &grupo@usuario1,@usuario2: mensagem.
+[ ] Parser identifica inserir &grupo@usuario1,@usuario2.
+[ ] Parser identifica aceitar ID e recusar ID.
+[ ] Parser retorna erro amigável para comando inválido.
+
+
+7. Etapa 5 — Criar o núcleo de serviços
+Nesta etapa ainda não precisa ter servidor TCP funcionando. Você pode testar chamando os métodos diretamente.
+7.1 UserService
+Responsabilidades:
+- cadastrar usuário
+- login
+- logout
+- recuperar senha por email
+- mudar status
+- listar usuários online
+
+Regras:
+- Não permitir login duplicado.
+- Não permitir email duplicado.
+- Não permitir nome/login repetido, conforme critério adotado.
+- Ao fazer login, status vira ONLINE.
+- Ao fazer logout, status vira OFFLINE.
+- Ao mudar para ONLINE, entregar mensagens pendentes.
+
+Observação: o enunciado diz que o usuário é identificado pelo nome e que não pode haver usuários com nomes iguais. Como também existe login, uma implementação segura é exigir:
+full_name único
+login único
+email único
+
+7.2 MessageService
+Responsabilidades:
+- enviar mensagem direta
+- enviar mensagem para grupo
+- enviar mensagem direta dentro de grupo
+- salvar mensagem offline
+- entregar mensagens pendentes
+- informar ao remetente quem recebeu e quem não recebeu
+
+Para mensagem direta:
+1. Verificar se remetente está logado.
+2. Verificar se destinatário existe.
+3. Verificar bloqueio entre remetente e destinatário.
+4. Verificar se o destinatário já aceitou conversa privada.
+5. Se não aceitou, criar convite de conversa privada.
+6. Se aceitou:
+   - se destinatário ONLINE: enviar imediatamente;
+   - caso contrário: salvar como pendente.
+7. Retornar ao remetente o resultado.
+
+7.3 GroupService
+Responsabilidades:
+- criar grupo
+- listar grupos
+- listar usuários de grupo
+- adicionar usuários ao grupo
+- processar aceite de convite de grupo
+- solicitar entrada em grupo
+- processar aprovação de todos os membros
+- sair do grupo
+- promover administrador
+
+Ao criar grupo:
+1. Verificar se o nome do grupo já existe.
+2. Criar grupo.
+3. Inserir criador como membro.
+4. Marcar criador como administrador.
+
+Ao adicionar usuário:
+1. Verificar se quem está adicionando é administrador.
+2. Verificar se o usuário existe.
+3. Criar convite pendente para o usuário.
+4. Quando o usuário aceitar, inserir no grupo.
+
+Ao solicitar entrada em grupo:
+1. Usuário envia: entrar &nomegrupo.
+2. Sistema cria solicitações pendentes para todos os membros atuais.
+3. Cada membro responde aceitar ou recusar.
+4. Se todos aceitarem, o usuário entra.
+5. Se qualquer um recusar, o usuário não entra.
+
+7.4 BlockService
+Responsabilidades:
+- bloquear usuário
+- desbloquear usuário
+- verificar se duas pessoas estão bloqueadas entre si
+
+Regra:
+O bloqueio deve afetar mensagens diretas, mensagens em grupo e mensagens diretas dentro do grupo.
+
+7.5 Testes de aceite da Etapa 5
+[ ] Cadastrar dois usuários.
+[ ] Fazer login de um usuário.
+[ ] Listar usuários online.
+[ ] Criar grupo.
+[ ] Verificar se criador virou administrador.
+[ ] Enviar convite para usuário entrar no grupo.
+[ ] Usuário aceitar convite.
+[ ] Usuário aparecer na lista de membros do grupo.
+[ ] Enviar mensagem direta para usuário sem aceite prévio.
+[ ] Destinatário receber pedido de aceite.
+[ ] Destinatário aceitar.
+[ ] Próxima mensagem direta ir sem perguntar novamente.
+[ ] Bloquear usuário.
+[ ] Verificar que mensagens entre bloqueados não são entregues.
+[ ] Enviar mensagem para usuário offline.
+[ ] Colocar usuário online.
+[ ] Verificar entrega da mensagem pendente.
+
+
+8. Etapa 6 — Criar o servidor TCP
+Agora entra a parte parecida com os exemplos das imagens do professor.
+O servidor precisa ter:
+- Uma thread principal aceitando conexões com ServerSocket.accept().
+- Para cada cliente aceito, criar uma ClientHandler em nova thread.
+- Cada ClientHandler conversa com apenas um cliente.
+
+8.1 Classe ChatServer
+public class ChatServer {
+    private int port;
+    private ClientSessionManager sessionManager;
+    private CommandProcessor commandProcessor;
+
+    public ChatServer(int port) {
+        this.port = port;
+        this.sessionManager = new ClientSessionManager();
+        this.commandProcessor = new CommandProcessor(sessionManager);
+    }
+
+    public void start() throws IOException {
+        ServerSocket serverSocket = new ServerSocket(port);
+        System.out.println("Servidor iniciado na porta " + port);
+
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            ClientHandler handler = new ClientHandler(
+                clientSocket,
+                sessionManager,
+                commandProcessor
+            );
+
+            new Thread(handler).start();
+        }
+    }
+}
+
+Essa parte segue exatamente a anotação:
+Conectou, cria uma thread, conversa com o cliente.
+Uma thread fica esperando accept.
+Quando aceita, cria outra thread para conversar.
+
+8.2 ClientHandler
+O ClientHandler representa um cliente conectado.
+Responsabilidades:
+- Ler linhas enviadas pelo cliente.
+- Mandar a linha para o CommandProcessor.
+- Enviar respostas ao cliente.
+- Associar socket a usuário após login.
+- Remover sessão quando desconectar.
+
+Exemplo conceitual:
+public class ClientHandler implements Runnable {
+    private Socket socket;
+    private BufferedReader input;
+    private PrintWriter output;
+    private ClientSessionManager sessionManager;
+    private CommandProcessor commandProcessor;
+    private Integer loggedUserId;
+
+    @Override
+    public void run() {
+        try {
+            input = new BufferedReader(
+                new InputStreamReader(socket.getInputStream())
+            );
+
+            output = new PrintWriter(socket.getOutputStream(), true);
+
+            output.println("Bem-vindo ao Chat TCP.");
+
+            String line;
+
+            while ((line = input.readLine()) != null) {
+                List<String> responses = commandProcessor.process(
+                    line,
+                    this
+                );
+
+                for (String response : responses) {
+                    send(response);
+                }
+            }
+
+        } catch (IOException e) {
+            System.out.println("Cliente desconectado.");
+        } finally {
+            disconnect();
+        }
+    }
+
+    public void send(String message) {
+        output.println(message);
+    }
+
+    private void disconnect() {
+        if (loggedUserId != null) {
+            sessionManager.remove(loggedUserId);
+            // também chamar UserService.logout(loggedUserId)
+        }
+    }
+}
+
+Pode usar BufferedReader e PrintWriter, ou DataInputStream e DataOutputStream. O importante é manter um protocolo consistente. Para console, BufferedReader e PrintWriter.println() são mais simples.
+8.3 ClientSessionManager
+Essa classe guarda quais usuários estão conectados neste momento.
+public class ClientSessionManager {
+    private final Map<Integer, ClientHandler> onlineClients = new ConcurrentHashMap<>();
+
+    public void add(int userId, ClientHandler handler) {
+        onlineClients.put(userId, handler);
+    }
+
+    public void remove(int userId) {
+        onlineClients.remove(userId);
+    }
+
+    public boolean isConnected(int userId) {
+        return onlineClients.containsKey(userId);
+    }
+
+    public void sendToUser(int userId, String message) {
+        ClientHandler handler = onlineClients.get(userId);
+
+        if (handler != null) {
+            handler.send(message);
+        }
+    }
+}
+
+Use ConcurrentHashMap porque várias threads vão acessar a lista de clientes conectados ao mesmo tempo.
+8.4 Testes de aceite da Etapa 6
+[ ] Iniciar servidor.
+[ ] Conectar um cliente via terminal ou programa simples.
+[ ] Servidor aceitar conexão.
+[ ] Servidor criar uma thread para esse cliente.
+[ ] Conectar dois clientes ao mesmo tempo.
+[ ] Cada cliente conseguir enviar texto sem derrubar o outro.
+[ ] Ao desconectar um cliente, o servidor continuar funcionando.
+
+
+9. Etapa 7 — Criar o cliente TCP
+O cliente também precisa de threads.
+O enunciado pede:
+O usuário pode enviar várias mensagens em seguida e receber várias mensagens em seguida.
+Pense em criar uma thread para envio e outra para receber.
+
+Então o cliente deve ter:
+- Thread 1: lê teclado e envia para o servidor.
+- Thread 2: escuta mensagens vindas do servidor e imprime no console.
+
+9.1 ChatClient
+public class ChatClient {
+    private String host;
+    private int port;
+
+    public void start() throws IOException {
+        Socket socket = new Socket(host, port);
+
+        Thread inputThread = new Thread(new ConsoleInputThread(socket));
+        Thread listenerThread = new Thread(new ServerListenerThread(socket));
+
+        listenerThread.start();
+        inputThread.start();
+    }
+}
+
+9.2 ConsoleInputThread
+public class ConsoleInputThread implements Runnable {
+    private Socket socket;
+
+    public ConsoleInputThread(Socket socket) {
+        this.socket = socket;
+    }
+
+    @Override
+    public void run() {
+        try {
+            BufferedReader keyboard = new BufferedReader(
+                new InputStreamReader(System.in)
+            );
+
+            PrintWriter out = new PrintWriter(
+                socket.getOutputStream(),
+                true
+            );
+
+            String line;
+
+            while ((line = keyboard.readLine()) != null) {
+                out.println(line);
+            }
+
+        } catch (IOException e) {
+            System.out.println("Erro ao enviar mensagem.");
+        }
+    }
+}
+
+9.3 ServerListenerThread
+public class ServerListenerThread implements Runnable {
+    private Socket socket;
+
+    public ServerListenerThread(Socket socket) {
+        this.socket = socket;
+    }
+
+    @Override
+    public void run() {
+        try {
+            BufferedReader in = new BufferedReader(
+                new InputStreamReader(socket.getInputStream())
+            );
+
+            String line;
+
+            while ((line = in.readLine()) != null) {
+                System.out.println();
+                System.out.println(line);
+                System.out.print("> ");
+            }
+
+        } catch (IOException e) {
+            System.out.println("Conexão com servidor encerrada.");
+        }
+    }
+}
+
+9.4 Sobre preservar comando digitado
+O requisito diz:
+Quando o usuário estiver escrevendo um comando e receber uma mensagem,
+a string do comando que estava escrevendo deve ser guardada,
+a mensagem recebida deve ser exibida
+e o comando deve voltar para a tela.
+
+Em console Java puro, isso é difícil usando apenas System.in, porque o Java padrão não controla bem o conteúdo que o usuário já digitou na linha atual.
+Há três abordagens possíveis:
+Opção simples
+Fazer:
+System.out.println();
+System.out.println(mensagemRecebida);
+System.out.print("> ");
+
+Isso não preserva perfeitamente a linha digitada, mas é aceitável em muitos trabalhos introdutórios.
+Opção melhor
+Usar biblioteca como JLine, que permite manipular a linha atual do terminal.
+Opção documentada
+Explicar na documentação que o console padrão do Java limita a restauração exata da linha digitada, mas que o cliente usa uma thread separada para receber mensagens e reimprimir o prompt.
+Se quiser cumprir esse requisito com mais fidelidade, recomendo usar JLine. Mas, se o professor não pediu biblioteca externa além do SQLite, a opção simples pode ser suficiente, desde que documentada.
+9.5 Testes de aceite da Etapa 7
+[ ] Cliente conecta ao servidor.
+[ ] Cliente consegue enviar comandos.
+[ ] Cliente consegue receber mensagens sem precisar pressionar Enter.
+[ ] Dois clientes conectados conseguem interagir.
+[ ] Cliente continua podendo digitar mesmo recebendo mensagens.
+[ ] Servidor não trava quando um cliente fecha o terminal.
+
+
+10. Etapa 8 — Implementar cadastro, login, logout e status
+Essa deve ser a primeira funcionalidade real integrada entre cliente e servidor.
+10.1 Comandos
+cadastro;Nome Completo;login;email;senha
+login;login;senha
+logout
+status;OCUPADO
+status;ONLINE
+status;AUSENTE
+recuperarsenha;email
+
+10.2 Fluxo de login
+Cliente envia:
+login;robson;123
+
+Servidor:
+1. Procura usuário pelo login.
+2. Confere senha.
+3. Define status ONLINE.
+4. Registra ClientHandler no ClientSessionManager.
+5. Entrega mensagens pendentes.
+6. Responde: Login realizado com sucesso.
+
+10.3 Fluxo de logout
+Cliente envia:
+logout
+
+Servidor:
+1. Verifica usuário logado.
+2. Define status OFFLINE.
+3. Remove usuário do ClientSessionManager.
+4. Responde: Logout realizado.
+
+10.4 Testes de aceite da Etapa 8
+[ ] Cadastrar usuário novo.
+[ ] Tentar cadastrar login repetido.
+[ ] Tentar cadastrar email repetido.
+[ ] Fazer login com senha correta.
+[ ] Recusar login com senha incorreta.
+[ ] Mudar status para OCUPADO.
+[ ] Mudar status para ONLINE.
+[ ] Logout mudar status para OFFLINE.
+[ ] Recuperar senha informando email válido.
+[ ] Negar recuperação para email inexistente.
+
+
+11. Etapa 9 — Listar usuários e grupos
+11.1 Comandos
+listausuarios
+listagrupos
+listargrupo &nomegrupo
+
+11.2 Regras
+listausuarios deve mostrar apenas usuários online, conforme o enunciado:
+Ao entrar no chat, o usuário poderá listar os grupos existentes e os usuários cadastrados online.
+
+listagrupos mostra os grupos existentes.
+listargrupo &nomegrupo mostra os membros daquele grupo.
+11.3 Testes de aceite da Etapa 9
+[ ] Com dois usuários cadastrados e um online, listausuarios mostra apenas o online.
+[ ] Com dois usuários online, ambos aparecem.
+[ ] Criar grupo e verificar se aparece em listagrupos.
+[ ] Listar membros de grupo.
+[ ] Comando de grupo inexistente retorna erro amigável.
+
+
+12. Etapa 10 — Mensagem direta com aceite prévio
+Este é um ponto importante do trabalho.
+12.1 Comando
+@robson: como vc vai?
+
+12.2 Primeiro envio sem aceite
+Fluxo:
+Usuário A envia:
+@robson: como vc vai?
+
+Servidor:
+1. Verifica se A está logado.
+2. Busca usuário robson.
+3. Verifica bloqueio.
+4. Verifica se já existe aceite de conversa privada.
+5. Se não existe:
+   - cria solicitação pendente;
+   - envia para robson:
+     [PEDIDO 10] augusto quer enviar mensagem privada para você. Digite aceitar 10 ou recusar 10.
+   - responde para augusto:
+     Pedido de conversa enviado para robson. A mensagem será enviada após aceite.
+
+É melhor não entregar a mensagem original antes do aceite.
+12.3 Aceite
+robson envia:
+aceitar 10
+
+Servidor:
+1. Marca permissão como aceita.
+2. Notifica augusto.
+3. A partir desse momento, mensagens entre eles podem ser enviadas.
+
+12.4 Envios seguintes
+augusto envia:
+@robson: agora sim, tudo bem?
+
+Servidor:
+1. Verifica permissão.
+2. Verifica bloqueio.
+3. Verifica status do destinatário.
+4. Se ONLINE, entrega.
+5. Se não ONLINE, salva pendente.
+6. Retorna ao remetente:
+   Mensagem enviada para robson.
+   ou
+   robson não está online. Mensagem será entregue depois.
+
+12.5 Testes de aceite da Etapa 10
+[ ] A tenta enviar mensagem privada para B pela primeira vez.
+[ ] B recebe pedido de aceite.
+[ ] B recusa.
+[ ] A é avisado da recusa.
+[ ] A tenta novamente e novo pedido pode ser criado ou sistema informa que foi recusado.
+[ ] B aceita.
+[ ] A envia mensagem novamente.
+[ ] B recebe a mensagem sem nova pergunta.
+[ ] Se B estiver offline, mensagem fica pendente.
+[ ] Quando B logar, recebe mensagem pendente.
+
+
+13. Etapa 11 — Criar grupo
+13.1 Comando
+novogrupo amigos
+
+13.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar se grupo já existe.
+3. Criar grupo.
+4. Inserir criador no grupo.
+5. Marcar criador como administrador.
+6. Responder:
+   Grupo amigos criado. Você é administrador.
+
+13.3 Testes de aceite da Etapa 11
+[ ] Usuário logado cria grupo.
+[ ] Grupo aparece em listagrupos.
+[ ] Criador aparece em listargrupo.
+[ ] Criador é administrador.
+[ ] Não permitir grupo com nome repetido.
+[ ] Não permitir criar grupo sem estar logado.
+
+
+14. Etapa 12 — Adicionar usuário ao grupo
+14.1 Comandos
+inserir &amigos@robson
+inserir &amigos@robson,@siscoutto
+
+14.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se usuário logado é administrador do grupo.
+4. Verificar se convidados existem.
+5. Para cada convidado:
+   - se já está no grupo, informar;
+   - senão criar convite pendente.
+6. Enviar convite para cada usuário online.
+7. Se usuário estiver offline, salvar convite pendente para ser visto depois.
+
+Mensagem para convidado:
+[CONVITE 21] augusto convidou você para entrar no grupo amigos.
+Digite aceitar 21 ou recusar 21.
+
+14.3 Aceite
+aceitar 21
+
+Servidor:
+1. Marca convite como aceito.
+2. Insere usuário no grupo.
+3. Avisa o grupo:
+   robson entrou no grupo amigos.
+
+14.4 Testes de aceite da Etapa 12
+[ ] Admin convida usuário para grupo.
+[ ] Usuário recebe convite.
+[ ] Usuário aceita.
+[ ] Usuário aparece em listargrupo.
+[ ] Grupo recebe aviso de entrada.
+[ ] Usuário recusa.
+[ ] Usuário não entra no grupo.
+[ ] Usuário não admin tenta inserir alguém e recebe erro.
+[ ] Inserir vários usuários separados por vírgula.
+[ ] Usuário offline recebe convite ao entrar.
+
+
+15. Etapa 13 — Enviar mensagem para grupo
+15.1 Comando sugerido
+&amigos: olá pessoal
+
+15.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar se grupo existe.
+3. Verificar se remetente é membro.
+4. Buscar membros do grupo, exceto remetente.
+5. Para cada membro:
+   - verificar bloqueio entre remetente e membro;
+   - se bloqueado, não entregar;
+   - se ONLINE, entregar;
+   - caso contrário, salvar pendente.
+6. Retornar ao remetente lista de quem recebeu e quem não recebeu.
+
+Formato da mensagem para destinatário:
+[amigos] augusto (12:10): olá pessoal
+
+15.3 Testes de aceite da Etapa 13
+[ ] Membro envia mensagem ao grupo.
+[ ] Todos os outros membros online recebem.
+[ ] Remetente recebe confirmação de entrega.
+[ ] Usuário offline não recebe na hora.
+[ ] Usuário offline recebe depois ao ficar online.
+[ ] Usuário bloqueado não recebe.
+[ ] Usuário não membro não consegue enviar para o grupo.
+
+
+16. Etapa 14 — Mensagem direta dentro do grupo
+16.1 Comandos
+&amigos@robson: olá, como vc vai robson
+&amigos@robson,@siscoutto: olá galera
+
+16.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se remetente é membro do grupo.
+4. Verificar se destinatários são membros do grupo.
+5. Para cada destinatário:
+   - verificar bloqueio;
+   - verificar status;
+   - entregar ou salvar pendente.
+6. Retornar ao remetente quem recebeu e quem não recebeu.
+
+Formato para destinatário:
+[amigos | privada] augusto (12:10): olá, como vc vai robson
+
+16.3 Testes de aceite da Etapa 14
+[ ] Enviar mensagem para um usuário específico do grupo.
+[ ] Apenas esse usuário recebe.
+[ ] Enviar para dois usuários separados por vírgula.
+[ ] Apenas os dois recebem.
+[ ] Usuário fora do grupo não pode ser destinatário.
+[ ] Bloqueio impede entrega.
+[ ] Offline recebe depois.
+
+
+17. Etapa 15 — Solicitar entrada em grupo existente
+17.1 Comando
+entrar &amigos
+
+17.2 Regra do enunciado
+Para um usuário entrar em um grupo existente,
+todos os usuários atuais devem aceitar.
+Caso contrário, a entrada é negada.
+
+17.3 Fluxo
+1. Usuário solicita entrada.
+2. Sistema verifica se grupo existe.
+3. Sistema verifica se usuário ainda não é membro.
+4. Sistema cria uma solicitação geral.
+5. Sistema cria confirmações pendentes para cada membro atual.
+6. Cada membro recebe:
+   [SOLICITAÇÃO 30] joao quer entrar no grupo amigos.
+   Digite aceitar 30 ou recusar 30.
+7. Se todos aceitarem:
+   - joao entra no grupo;
+   - grupo é avisado.
+8. Se um recusar:
+   - joao não entra;
+   - joao é avisado;
+   - demais pendências podem ser canceladas.
+
+17.4 Modelagem sugerida
+A tabela pending_requests pode guardar:
+request_type = GROUP_JOIN_APPROVAL
+requester_user_id = usuário que quer entrar
+target_user_id = membro que precisa aprovar
+group_id = grupo
+status = PENDING / ACCEPTED / REJECTED / CANCELLED
+
+Para verificar se todos aceitaram:
+SELECT COUNT(*) FROM pending_requests
+WHERE requester_user_id = ?
+AND group_id = ?
+AND request_type = 'GROUP_JOIN_APPROVAL'
+AND status = 'PENDING';
+
+Se não houver pendentes e não houver rejeitados, adiciona ao grupo.
+17.5 Testes de aceite da Etapa 15
+[ ] Usuário solicita entrada em grupo.
+[ ] Todos os membros recebem solicitação.
+[ ] Um membro aceita, mas usuário ainda não entra.
+[ ] Último membro aceita, usuário entra.
+[ ] Se um membro recusar, usuário é negado.
+[ ] Solicitações restantes são canceladas após recusa.
+[ ] Usuário já membro não pode solicitar entrada novamente.
+
+
+18. Etapa 16 — Promover administrador
+18.1 Comando sugerido
+promover &amigos@robson
+
+18.2 Regra
+Um administrador pode convidar outro membro para ser administrador.
+O usuário convidado deve aceitar.
+
+18.3 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se remetente é administrador.
+4. Verificar se o alvo é membro do grupo.
+5. Criar convite de promoção.
+6. Usuário alvo recebe:
+   [ADMIN 40] augusto quer tornar você administrador do grupo amigos.
+   Digite aceitar 40 ou recusar 40.
+7. Se aceitar, marcar is_admin = 1.
+8. Avisar grupo.
+
+18.4 Testes de aceite da Etapa 16
+[ ] Admin convida membro para ser admin.
+[ ] Membro aceita.
+[ ] Membro vira admin.
+[ ] Novo admin consegue adicionar usuários.
+[ ] Membro recusa.
+[ ] Membro continua sem permissão de admin.
+[ ] Usuário não admin não pode promover.
+
+
+19. Etapa 17 — Sair do grupo
+19.1 Comando
+sair &amigos
+
+19.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se usuário é membro.
+4. Remover usuário do grupo.
+5. Avisar todos os participantes:
+   robson saiu do grupo amigos.
+
+19.3 Caso especial: administrador único
+Você precisa decidir uma regra e documentar.
+Sugestões:
+Opção A — impedir saída do último administrador
+Você é o único administrador. Promova outro usuário antes de sair.
+
+Opção B — transferir administração automaticamente
+O membro mais antigo vira administrador.
+
+Recomendo a opção A, porque é mais simples e explícita.
+19.4 Testes de aceite da Etapa 17
+[ ] Usuário sai do grupo.
+[ ] Usuário não aparece mais na lista.
+[ ] Demais membros recebem aviso.
+[ ] Usuário que saiu não recebe novas mensagens.
+[ ] Último administrador não consegue sair sem promover outro.
+
+
+20. Etapa 18 — Bloqueio de usuários
+20.1 Comandos
+bloquear @robson
+desbloquear @robson
+
+20.2 Regra
+Se A bloqueia B:
+- B não consegue mandar mensagem direta para A.
+- A não consegue mandar mensagem direta para B.
+- Mensagens de B em grupo não chegam para A.
+- Mensagens de A em grupo não chegam para B.
+- Mensagens diretas dentro do grupo também são bloqueadas.
+
+20.3 Testes de aceite da Etapa 18
+[ ] A bloqueia B.
+[ ] B tenta mandar mensagem direta para A e falha.
+[ ] A tenta mandar mensagem direta para B e falha.
+[ ] A e B estão no mesmo grupo.
+[ ] B manda mensagem no grupo.
+[ ] Todos recebem, menos A.
+[ ] A manda mensagem no grupo.
+[ ] Todos recebem, menos B.
+[ ] A desbloqueia B.
+[ ] Mensagens voltam a ser entregues.
+
+
+21. Etapa 19 — Mensagens offline
+Este requisito aparece várias vezes no enunciado.
+21.1 Regra
+Se o destinatário não estiver ONLINE, a mensagem deve ser salva.
+Quando ele ficar ONLINE, o servidor entrega as mensagens pendentes.
+
+Isso vale para:
+- mensagem direta;
+- mensagem de grupo;
+- mensagem direta dentro do grupo;
+- convites;
+- solicitações;
+- avisos importantes.
+
+21.2 Fluxo de entrega pendente
+Quando usuário faz login ou muda status para ONLINE:
+1. Buscar entregas pendentes do usuário.
+2. Para cada entrega:
+   - enviar pelo ClientSessionManager;
+   - marcar como entregue.
+3. Informar:
+   Você recebeu X mensagens pendentes.
+
+21.3 Testes de aceite da Etapa 19
+[ ] B está offline.
+[ ] A envia mensagem direta para B.
+[ ] A recebe aviso de que B receberá depois.
+[ ] B faz login.
+[ ] B recebe mensagem pendente.
+[ ] Mensagem é marcada como entregue.
+[ ] B faz logout e login novamente.
+[ ] A mesma mensagem não é entregue de novo.
+
+
+22. Etapa 20 — Confirmação de entrega ao remetente
+O enunciado pede:
+Quando usuário A enviar mensagem privada ou de grupo,
+deve retornar uma mensagem para A indicando quem recebeu ou não recebeu.
+
+22.1 Exemplo em mensagem direta
+Mensagem enviada para robson.
+
+Ou:
+robson não está online. A mensagem será entregue quando ele entrar.
+
+Ou:
+Mensagem não enviada para robson: usuário bloqueado.
+
+22.2 Exemplo em grupo
+Resultado do envio para o grupo amigos:
+Receberam agora: robson, maria
+Receberão depois: joao
+Não receberam: siscoutto bloqueado
+
+22.3 Testes de aceite da Etapa 20
+[ ] Remetente recebe confirmação em mensagem direta.
+[ ] Remetente recebe lista de entrega em grupo.
+[ ] Remetente recebe lista de pendentes.
+[ ] Remetente recebe lista de bloqueados/não entregues.
+
+
+23. Etapa 21 — Ajustar concorrência e segurança de threads
+Como o servidor é multithread, alguns pontos precisam de cuidado.
+23.1 Use ConcurrentHashMap para sessões
+private final Map<Integer, ClientHandler> onlineClients = new ConcurrentHashMap<>();
+
+23.2 Evite compartilhar Connection global
+Para SQLite, prefira abrir conexão por operação no repositório:
+try (Connection conn = Database.getConnection()) {
+    // operação
+}
+
+23.3 Sincronizar operações críticas
+Algumas operações podem precisar de synchronized, por exemplo:
+- aceitar convite;
+- criar grupo com nome único;
+- processar entrada em grupo que depende de todos aceitarem;
+- entregar mensagens pendentes.
+
+Não precisa sincronizar tudo. Sincronize apenas operações que podem gerar inconsistência.
+23.4 Testes de aceite da Etapa 21
+[ ] Dois clientes fazem login simultaneamente.
+[ ] Dois clientes enviam mensagens ao mesmo tempo.
+[ ] Dois usuários respondem solicitação de entrada quase ao mesmo tempo.
+[ ] Servidor não gera exceção.
+[ ] Banco não fica com dados duplicados indevidos.
+
+
+24. Ordem recomendada de implementação
+Uma ordem realista:
+1. Criar projeto Java.
+2. Configurar SQLite.
+3. Criar tabelas.
+4. Criar modelos.
+5. Criar repositórios.
+6. Criar serviços de usuário.
+7. Criar parser de comandos.
+8. Criar servidor TCP simples.
+9. Criar cliente TCP simples.
+10. Integrar cadastro/login/logout.
+11. Integrar listausuarios/listagrupos.
+12. Implementar mensagens diretas com aceite.
+13. Implementar mensagens offline.
+14. Implementar criação de grupos.
+15. Implementar convite para grupo.
+16. Implementar mensagens de grupo.
+17. Implementar mensagens diretas dentro do grupo.
+18. Implementar solicitação de entrada em grupo.
+19. Implementar promoção de administrador.
+20. Implementar saída de grupo.
+21. Implementar bloqueios.
+22. Revisar confirmações de entrega.
+23. Testar com vários clientes.
+24. Escrever documentação final.
+
+
+25. Sugestão de protocolo de resposta do servidor
+Para deixar o cliente simples, o servidor pode enviar tudo como texto comum.
+Exemplos:
+[OK] Login realizado com sucesso.
+[ERRO] Senha incorreta.
+[SISTEMA] robson entrou no grupo amigos.
+[PRIVADO] augusto (12:10): olá
+[GRUPO amigos] maria (12:11): bom dia
+[GRUPO amigos | PRIVADO] joao (12:12): mensagem só para você
+[CONVITE 15] augusto quer conversar em privado. Digite aceitar 15 ou recusar 15.
+
+Isso facilita muito a implementação do cliente, porque ele apenas imprime o que o servidor mandar.
+
+26. Documentação final do projeto
+No arquivo docs/documentacao.md, documente:
+1. Objetivo do projeto.
+2. Arquitetura geral.
+3. Como funciona o servidor.
+4. Como funciona o cliente.
+5. Como as threads foram usadas.
+6. Como os sockets TCP foram usados.
+7. Como o banco SQLite foi usado.
+8. Modelo das tabelas.
+9. Lista de comandos.
+10. Fluxo de login/logout.
+11. Fluxo de mensagem privada.
+12. Fluxo de grupo.
+13. Fluxo de bloqueio.
+14. Fluxo de mensagens offline.
+15. Limitações conhecidas.
+16. Como compilar.
+17. Como executar.
+18. Testes realizados.
+
+Exemplo de trecho:
+O servidor utiliza um ServerSocket na porta 6789. A thread principal fica bloqueada em accept(), aguardando novas conexões. Quando um cliente se conecta, o servidor cria uma nova Thread executando um ClientHandler. Cada ClientHandler é responsável por ler comandos daquele cliente, enviar respostas e manter a sessão associada ao usuário logado.
+
+
+27. Plano mínimo viável para entregar primeiro
+Se o prazo apertar, implemente primeiro nesta ordem:
+1. Cadastro/login/logout.
+2. Servidor multithread.
+3. Cliente com thread de envio e thread de recebimento.
+4. Mensagem direta.
+5. Mensagem offline.
+6. Criar grupo.
+7. Enviar mensagem para grupo.
+8. Listar usuários e grupos.
+9. Bloqueio.
+10. Convites e aceitações.
+
+Depois complete:
+- solicitação de entrada com aceite de todos;
+- promoção de administrador com aceite;
+- mensagem direta para usuários específicos dentro do grupo;
+- preservação visual da linha digitada no console.
+
+
+28. Critério de pronto por etapa
+Uma funcionalidade só deve ser considerada pronta quando:
+[ ] Funciona com um cliente.
+[ ] Funciona com dois clientes.
+[ ] Funciona com três ou mais clientes.
+[ ] Salva corretamente no SQLite.
+[ ] Continua funcionando após reiniciar o servidor.
+[ ] Trata erro de comando inválido.
+[ ] Trata usuário inexistente.
+[ ] Trata usuário offline.
+[ ] Respeita bloqueios.
+[ ] Responde ao remetente com sucesso ou falha.
+
+
+29. Resumo da implementação ideal
+O projeto deve terminar com este comportamento:
+Servidor:
+- Fica aguardando conexões TCP.
+- Para cada cliente conectado, cria uma thread.
+- Cada thread interpreta comandos e usa os serviços do núcleo.
+- O núcleo grava e consulta dados no SQLite.
+- O servidor entrega mensagens em tempo real para usuários online.
+- O servidor salva mensagens para usuários não online.
+- Ao login, o servidor entrega pendências.
+
+Cliente:
+- Conecta ao servidor por TCP.
+- Uma thread lê teclado e envia comandos.
+- Outra thread recebe mensagens do servidor.
+- O console mostra mensagens privadas, grupos, convites e erros.
+
+Esse caminho evita tentar implementar tudo de uma vez. Primeiro você constrói uma base estável, depois adiciona funcionalidades mais complexas como grupos, bloqueios, aceite de convites e mensagens offline.
+ncremental para desenvolver o projeto do zero, em Java, usando Sockets TCP, Threads, console e SQLite.
+A ideia principal é construir primeiro o núcleo do sistema, que não depende diretamente de socket nem de console, e só depois criar a “casca”: servidor TCP, cliente TCP e interface via terminal.
+
+1. Visão geral da arquitetura
+O projeto pode ser pensado em camadas:
+┌──────────────────────────────────────────────┐
+│ Cliente Console                              │
+│ - Lê comandos do usuário                     │
+│ - Envia comandos ao servidor                 │
+│ - Recebe mensagens em thread separada        │
+└──────────────────────────────────────────────┘
+                    │ TCP
+                    ▼
+┌──────────────────────────────────────────────┐
+│ Servidor TCP                                 │
+│ - Aceita múltiplos clientes                  │
+│ - Cria uma thread para cada cliente          │
+│ - Encaminha comandos para o núcleo           │
+└──────────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────┐
+│ Núcleo da Aplicação                          │
+│ - Login/logout                               │
+│ - Usuários                                   │
+│ - Mensagens privadas                         │
+│ - Grupos                                     │
+│ - Bloqueios                                  │
+│ - Convites e aceite                          │
+│ - Mensagens offline                          │
+└──────────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────┐
+│ Persistência SQLite                          │
+│ - users                                      │
+│ - messages                                   │
+│ - groups                                     │
+│ - group_members                              │
+│ - blocks                                     │
+│ - direct_permissions                         │
+│ - pending_requests                           │
+└──────────────────────────────────────────────┘
+
+A regra mais importante é: não misturar regra de negócio com socket.
+O socket apenas transporta texto entre cliente e servidor. Quem decide se uma mensagem pode ser enviada, se o usuário está bloqueado, se está online ou se deve receber depois é o núcleo do sistema.
+
+2. Estrutura inicial do projeto
+Uma estrutura simples pode ser:
+chat-socket-java/
+│
+├── src/
+│   └── main/
+│       └── java/
+│           └── br/
+│               └── edu/
+│                   └── chat/
+│                       ├── MainServer.java
+│                       ├── MainClient.java
+│                       │
+│                       ├── server/
+│                       │   ├── ChatServer.java
+│                       │   ├── ClientHandler.java
+│                       │   └── ClientSessionManager.java
+│                       │
+│                       ├── client/
+│                       │   ├── ChatClient.java
+│                       │   ├── ConsoleInputThread.java
+│                       │   └── ServerListenerThread.java
+│                       │
+│                       ├── core/
+│                       │   ├── ChatService.java
+│                       │   ├── UserService.java
+│                       │   ├── GroupService.java
+│                       │   ├── MessageService.java
+│                       │   └── CommandProcessor.java
+│                       │
+│                       ├── model/
+│                       │   ├── User.java
+│                       │   ├── Group.java
+│                       │   ├── Message.java
+│                       │   ├── UserStatus.java
+│                       │   └── PendingRequest.java
+│                       │
+│                       ├── repository/
+│                       │   ├── Database.java
+│                       │   ├── UserRepository.java
+│                       │   ├── GroupRepository.java
+│                       │   ├── MessageRepository.java
+│                       │   ├── BlockRepository.java
+│                       │   └── RequestRepository.java
+│                       │
+│                       └── protocol/
+│                           ├── ClientCommand.java
+│                           ├── ServerResponse.java
+│                           └── CommandParser.java
+│
+├── database/
+│   └── chat.db
+│
+├── docs/
+│   └── documentacao.md
+│
+└── README.md
+
+Caso o professor permita Maven, use Maven para facilitar o SQLite:
+<dependency>
+    <groupId>org.xerial</groupId>
+    <artifactId>sqlite-jdbc</artifactId>
+    <version>3.46.1.0</version>
+</dependency>
+
+Sem Maven, será necessário baixar o .jar do SQLite JDBC e adicioná-lo ao classpath.
+
+3. Etapa 1 — Criar o banco SQLite
+Antes de pensar no socket, crie o banco de dados.
+3.1 Tabelas principais
+Sugestão inicial:
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT NOT NULL,
+    login TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OFFLINE',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    blocker_user_id INTEGER NOT NULL,
+    blocked_user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(blocker_user_id, blocked_user_id),
+    FOREIGN KEY(blocker_user_id) REFERENCES users(id),
+    FOREIGN KEY(blocked_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS direct_permissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    requester_user_id INTEGER NOT NULL,
+    target_user_id INTEGER NOT NULL,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(requester_user_id, target_user_id),
+    FOREIGN KEY(requester_user_id) REFERENCES users(id),
+    FOREIGN KEY(target_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS groups_chat (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_by_user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    joined_at TEXT NOT NULL,
+    UNIQUE(group_id, user_id),
+    FOREIGN KEY(group_id) REFERENCES groups_chat(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_user_id INTEGER NOT NULL,
+    receiver_user_id INTEGER,
+    group_id INTEGER,
+    content TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(sender_user_id) REFERENCES users(id),
+    FOREIGN KEY(receiver_user_id) REFERENCES users(id),
+    FOREIGN KEY(group_id) REFERENCES groups_chat(id)
+);
+
+CREATE TABLE IF NOT EXISTS message_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    receiver_user_id INTEGER NOT NULL,
+    delivered INTEGER NOT NULL DEFAULT 0,
+    delivered_at TEXT,
+    FOREIGN KEY(message_id) REFERENCES messages(id),
+    FOREIGN KEY(receiver_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS pending_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_type TEXT NOT NULL,
+    requester_user_id INTEGER NOT NULL,
+    target_user_id INTEGER,
+    group_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(requester_user_id) REFERENCES users(id),
+    FOREIGN KEY(target_user_id) REFERENCES users(id),
+    FOREIGN KEY(group_id) REFERENCES groups_chat(id)
+);
+
+3.2 Enum de status
+No Java:
+public enum UserStatus {
+    ONLINE,
+    OFFLINE,
+    OCUPADO,
+    AUSENTE
+}
+
+Regra do projeto:
+Apenas usuários ONLINE recebem mensagens imediatamente.
+Usuários OFFLINE, OCUPADO ou AUSENTE recebem depois, quando ficarem ONLINE.
+
+3.3 Testes de aceite da Etapa 1
+Antes de continuar, teste:
+[ ] O banco chat.db é criado.
+[ ] As tabelas são criadas sem erro.
+[ ] É possível inserir um usuário manualmente.
+[ ] É possível impedir dois usuários com mesmo login.
+[ ] É possível impedir dois usuários com mesmo email.
+[ ] É possível consultar usuários cadastrados.
+
+
+4. Etapa 2 — Criar os modelos Java
+Crie classes simples para representar os dados principais.
+4.1 Classe User
+public class User {
+    private int id;
+    private String fullName;
+    private String login;
+    private String email;
+    private String password;
+    private UserStatus status;
+
+    // construtores, getters e setters
+}
+
+4.2 Classe Group
+public class Group {
+    private int id;
+    private String name;
+    private int createdByUserId;
+
+    // construtores, getters e setters
+}
+
+4.3 Classe Message
+public class Message {
+    private int id;
+    private int senderUserId;
+    private Integer receiverUserId;
+    private Integer groupId;
+    private String content;
+    private String messageType;
+    private String createdAt;
+
+    // construtores, getters e setters
+}
+
+Tipos úteis de mensagem:
+DIRECT
+GROUP
+GROUP_DIRECT
+SYSTEM
+INVITE
+REQUEST
+
+4.4 Testes de aceite da Etapa 2
+[ ] O projeto compila.
+[ ] É possível criar objetos User, Group e Message.
+[ ] O enum UserStatus funciona.
+[ ] Nenhuma classe de modelo depende de socket, console ou banco diretamente.
+
+
+5. Etapa 3 — Criar a camada de persistência
+Crie uma classe Database responsável por abrir conexão com SQLite.
+public class Database {
+    private static final String URL = "jdbc:sqlite:database/chat.db";
+
+    public static Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(URL);
+    }
+}
+
+Depois crie repositórios.
+5.1 UserRepository
+Responsabilidades:
+- create(User user)
+- findByLogin(String login)
+- findByEmail(String email)
+- findById(int id)
+- listAll()
+- listOnline()
+- updateStatus(int userId, UserStatus status)
+- existsLogin(String login)
+- existsEmail(String email)
+
+5.2 GroupRepository
+Responsabilidades:
+- createGroup(String name, int creatorId)
+- findByName(String name)
+- listGroups()
+- addMember(int groupId, int userId, boolean admin)
+- removeMember(int groupId, int userId)
+- listMembers(int groupId)
+- listAdmins(int groupId)
+- isMember(int groupId, int userId)
+- isAdmin(int groupId, int userId)
+- makeAdmin(int groupId, int userId)
+
+5.3 MessageRepository
+Responsabilidades:
+- saveMessage(...)
+- saveDelivery(...)
+- listPendingDeliveriesForUser(int userId)
+- markDelivered(int deliveryId)
+
+5.4 BlockRepository
+Responsabilidades:
+- blockUser(int blockerId, int blockedId)
+- unblockUser(int blockerId, int blockedId)
+- isBlockedBetween(int userA, int userB)
+
+A regra deve considerar bloqueio nos dois sentidos:
+Se A bloqueou B:
+- B não envia mensagem direta para A.
+- A também não envia mensagem direta para B.
+- Mensagens de grupo de B não chegam para A.
+- Mensagens de grupo de A não chegam para B.
+
+5.5 Testes de aceite da Etapa 3
+Faça uma classe temporária RepositoryTestMain.
+[ ] Cadastrar usuário no banco.
+[ ] Buscar usuário por login.
+[ ] Alterar status para ONLINE.
+[ ] Criar grupo.
+[ ] Inserir criador como administrador.
+[ ] Listar grupos.
+[ ] Listar usuários online.
+[ ] Criar bloqueio entre dois usuários.
+[ ] Verificar se bloqueio impede relação entre A e B.
+[ ] Salvar mensagem pendente.
+[ ] Consultar mensagens pendentes de um usuário.
+
+
+6. Etapa 4 — Definir o protocolo textual
+Como o projeto é via console, é importante definir os comandos aceitos.
+6.1 Comandos de usuário
+Sugestão:
+cadastro;Nome Completo;login;email;senha
+login;login;senha
+logout
+recuperarsenha;email
+status;ONLINE
+status;OCUPADO
+status;AUSENTE
+
+6.2 Comandos de listagem
+listausuarios
+listagrupos
+listargrupo &nomegrupo
+
+6.3 Mensagem direta
+Formato exigido:
+@robson: como vc vai?
+
+Interpretação:
+destinatário = robson
+conteúdo = como vc vai?
+
+6.4 Criar grupo
+novogrupo nomegrupo
+
+6.5 Inserir usuário em grupo
+inserir &nomegrupo@usuario
+inserir &nomegrupo@usuario1,@usuario2
+
+6.6 Entrar em grupo existente
+entrar &nomegrupo
+
+6.7 Mensagem para grupo todo
+Sugestão:
+&nomegrupo: mensagem para todos
+
+6.8 Mensagem direta dentro do grupo
+&nomegrupo@robson: olá, como vc vai robson
+&nomegrupo@robson,@siscoutto: olá galera
+
+6.9 Bloqueio
+Sugestão:
+bloquear @usuario
+desbloquear @usuario
+
+6.10 Sair do grupo
+sair &nomegrupo
+
+Ou, caso o usuário esteja em um modo específico de grupo, apenas:
+sair
+
+Mas para console simples, recomendo usar:
+sair &nomegrupo
+
+Fica menos ambíguo.
+6.11 Aceite ou recusa de convites
+Como várias situações exigem confirmação, use comandos com identificador:
+aceitar 15
+recusar 15
+
+Exemplo de mensagem enviada pelo servidor:
+[CONVITE 15] O usuário joao quer conversar em privado com você. Digite: aceitar 15 ou recusar 15
+
+Isso evita confusão caso o usuário receba vários convites ao mesmo tempo.
+6.12 Testes de aceite da Etapa 4
+[ ] Parser identifica login.
+[ ] Parser identifica cadastro.
+[ ] Parser identifica @usuario: mensagem.
+[ ] Parser identifica &grupo: mensagem.
+[ ] Parser identifica &grupo@usuario1,@usuario2: mensagem.
+[ ] Parser identifica inserir &grupo@usuario1,@usuario2.
+[ ] Parser identifica aceitar ID e recusar ID.
+[ ] Parser retorna erro amigável para comando inválido.
+
+
+7. Etapa 5 — Criar o núcleo de serviços
+Nesta etapa ainda não precisa ter servidor TCP funcionando. Você pode testar chamando os métodos diretamente.
+7.1 UserService
+Responsabilidades:
+- cadastrar usuário
+- login
+- logout
+- recuperar senha por email
+- mudar status
+- listar usuários online
+
+Regras:
+- Não permitir login duplicado.
+- Não permitir email duplicado.
+- Não permitir nome/login repetido, conforme critério adotado.
+- Ao fazer login, status vira ONLINE.
+- Ao fazer logout, status vira OFFLINE.
+- Ao mudar para ONLINE, entregar mensagens pendentes.
+
+Observação: o enunciado diz que o usuário é identificado pelo nome e que não pode haver usuários com nomes iguais. Como também existe login, uma implementação segura é exigir:
+full_name único
+login único
+email único
+
+7.2 MessageService
+Responsabilidades:
+- enviar mensagem direta
+- enviar mensagem para grupo
+- enviar mensagem direta dentro de grupo
+- salvar mensagem offline
+- entregar mensagens pendentes
+- informar ao remetente quem recebeu e quem não recebeu
+
+Para mensagem direta:
+1. Verificar se remetente está logado.
+2. Verificar se destinatário existe.
+3. Verificar bloqueio entre remetente e destinatário.
+4. Verificar se o destinatário já aceitou conversa privada.
+5. Se não aceitou, criar convite de conversa privada.
+6. Se aceitou:
+   - se destinatário ONLINE: enviar imediatamente;
+   - caso contrário: salvar como pendente.
+7. Retornar ao remetente o resultado.
+
+7.3 GroupService
+Responsabilidades:
+- criar grupo
+- listar grupos
+- listar usuários de grupo
+- adicionar usuários ao grupo
+- processar aceite de convite de grupo
+- solicitar entrada em grupo
+- processar aprovação de todos os membros
+- sair do grupo
+- promover administrador
+
+Ao criar grupo:
+1. Verificar se o nome do grupo já existe.
+2. Criar grupo.
+3. Inserir criador como membro.
+4. Marcar criador como administrador.
+
+Ao adicionar usuário:
+1. Verificar se quem está adicionando é administrador.
+2. Verificar se o usuário existe.
+3. Criar convite pendente para o usuário.
+4. Quando o usuário aceitar, inserir no grupo.
+
+Ao solicitar entrada em grupo:
+1. Usuário envia: entrar &nomegrupo.
+2. Sistema cria solicitações pendentes para todos os membros atuais.
+3. Cada membro responde aceitar ou recusar.
+4. Se todos aceitarem, o usuário entra.
+5. Se qualquer um recusar, o usuário não entra.
+
+7.4 BlockService
+Responsabilidades:
+- bloquear usuário
+- desbloquear usuário
+- verificar se duas pessoas estão bloqueadas entre si
+
+Regra:
+O bloqueio deve afetar mensagens diretas, mensagens em grupo e mensagens diretas dentro do grupo.
+
+7.5 Testes de aceite da Etapa 5
+[ ] Cadastrar dois usuários.
+[ ] Fazer login de um usuário.
+[ ] Listar usuários online.
+[ ] Criar grupo.
+[ ] Verificar se criador virou administrador.
+[ ] Enviar convite para usuário entrar no grupo.
+[ ] Usuário aceitar convite.
+[ ] Usuário aparecer na lista de membros do grupo.
+[ ] Enviar mensagem direta para usuário sem aceite prévio.
+[ ] Destinatário receber pedido de aceite.
+[ ] Destinatário aceitar.
+[ ] Próxima mensagem direta ir sem perguntar novamente.
+[ ] Bloquear usuário.
+[ ] Verificar que mensagens entre bloqueados não são entregues.
+[ ] Enviar mensagem para usuário offline.
+[ ] Colocar usuário online.
+[ ] Verificar entrega da mensagem pendente.
+
+
+8. Etapa 6 — Criar o servidor TCP
+Agora entra a parte parecida com os exemplos das imagens do professor.
+O servidor precisa ter:
+- Uma thread principal aceitando conexões com ServerSocket.accept().
+- Para cada cliente aceito, criar uma ClientHandler em nova thread.
+- Cada ClientHandler conversa com apenas um cliente.
+
+8.1 Classe ChatServer
+public class ChatServer {
+    private int port;
+    private ClientSessionManager sessionManager;
+    private CommandProcessor commandProcessor;
+
+    public ChatServer(int port) {
+        this.port = port;
+        this.sessionManager = new ClientSessionManager();
+        this.commandProcessor = new CommandProcessor(sessionManager);
+    }
+
+    public void start() throws IOException {
+        ServerSocket serverSocket = new ServerSocket(port);
+        System.out.println("Servidor iniciado na porta " + port);
+
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            ClientHandler handler = new ClientHandler(
+                clientSocket,
+                sessionManager,
+                commandProcessor
+            );
+
+            new Thread(handler).start();
+        }
+    }
+}
+
+Essa parte segue exatamente a anotação:
+Conectou, cria uma thread, conversa com o cliente.
+Uma thread fica esperando accept.
+Quando aceita, cria outra thread para conversar.
+
+8.2 ClientHandler
+O ClientHandler representa um cliente conectado.
+Responsabilidades:
+- Ler linhas enviadas pelo cliente.
+- Mandar a linha para o CommandProcessor.
+- Enviar respostas ao cliente.
+- Associar socket a usuário após login.
+- Remover sessão quando desconectar.
+
+Exemplo conceitual:
+public class ClientHandler implements Runnable {
+    private Socket socket;
+    private BufferedReader input;
+    private PrintWriter output;
+    private ClientSessionManager sessionManager;
+    private CommandProcessor commandProcessor;
+    private Integer loggedUserId;
+
+    @Override
+    public void run() {
+        try {
+            input = new BufferedReader(
+                new InputStreamReader(socket.getInputStream())
+            );
+
+            output = new PrintWriter(socket.getOutputStream(), true);
+
+            output.println("Bem-vindo ao Chat TCP.");
+
+            String line;
+
+            while ((line = input.readLine()) != null) {
+                List<String> responses = commandProcessor.process(
+                    line,
+                    this
+                );
+
+                for (String response : responses) {
+                    send(response);
+                }
+            }
+
+        } catch (IOException e) {
+            System.out.println("Cliente desconectado.");
+        } finally {
+            disconnect();
+        }
+    }
+
+    public void send(String message) {
+        output.println(message);
+    }
+
+    private void disconnect() {
+        if (loggedUserId != null) {
+            sessionManager.remove(loggedUserId);
+            // também chamar UserService.logout(loggedUserId)
+        }
+    }
+}
+
+Pode usar BufferedReader e PrintWriter, ou DataInputStream e DataOutputStream. O importante é manter um protocolo consistente. Para console, BufferedReader e PrintWriter.println() são mais simples.
+8.3 ClientSessionManager
+Essa classe guarda quais usuários estão conectados neste momento.
+public class ClientSessionManager {
+    private final Map<Integer, ClientHandler> onlineClients = new ConcurrentHashMap<>();
+
+    public void add(int userId, ClientHandler handler) {
+        onlineClients.put(userId, handler);
+    }
+
+    public void remove(int userId) {
+        onlineClients.remove(userId);
+    }
+
+    public boolean isConnected(int userId) {
+        return onlineClients.containsKey(userId);
+    }
+
+    public void sendToUser(int userId, String message) {
+        ClientHandler handler = onlineClients.get(userId);
+
+        if (handler != null) {
+            handler.send(message);
+        }
+    }
+}
+
+Use ConcurrentHashMap porque várias threads vão acessar a lista de clientes conectados ao mesmo tempo.
+8.4 Testes de aceite da Etapa 6
+[ ] Iniciar servidor.
+[ ] Conectar um cliente via terminal ou programa simples.
+[ ] Servidor aceitar conexão.
+[ ] Servidor criar uma thread para esse cliente.
+[ ] Conectar dois clientes ao mesmo tempo.
+[ ] Cada cliente conseguir enviar texto sem derrubar o outro.
+[ ] Ao desconectar um cliente, o servidor continuar funcionando.
+
+
+9. Etapa 7 — Criar o cliente TCP
+O cliente também precisa de threads.
+O enunciado pede:
+O usuário pode enviar várias mensagens em seguida e receber várias mensagens em seguida.
+Pense em criar uma thread para envio e outra para receber.
+
+Então o cliente deve ter:
+- Thread 1: lê teclado e envia para o servidor.
+- Thread 2: escuta mensagens vindas do servidor e imprime no console.
+
+9.1 ChatClient
+public class ChatClient {
+    private String host;
+    private int port;
+
+    public void start() throws IOException {
+        Socket socket = new Socket(host, port);
+
+        Thread inputThread = new Thread(new ConsoleInputThread(socket));
+        Thread listenerThread = new Thread(new ServerListenerThread(socket));
+
+        listenerThread.start();
+        inputThread.start();
+    }
+}
+
+9.2 ConsoleInputThread
+public class ConsoleInputThread implements Runnable {
+    private Socket socket;
+
+    public ConsoleInputThread(Socket socket) {
+        this.socket = socket;
+    }
+
+    @Override
+    public void run() {
+        try {
+            BufferedReader keyboard = new BufferedReader(
+                new InputStreamReader(System.in)
+            );
+
+            PrintWriter out = new PrintWriter(
+                socket.getOutputStream(),
+                true
+            );
+
+            String line;
+
+            while ((line = keyboard.readLine()) != null) {
+                out.println(line);
+            }
+
+        } catch (IOException e) {
+            System.out.println("Erro ao enviar mensagem.");
+        }
+    }
+}
+
+9.3 ServerListenerThread
+public class ServerListenerThread implements Runnable {
+    private Socket socket;
+
+    public ServerListenerThread(Socket socket) {
+        this.socket = socket;
+    }
+
+    @Override
+    public void run() {
+        try {
+            BufferedReader in = new BufferedReader(
+                new InputStreamReader(socket.getInputStream())
+            );
+
+            String line;
+
+            while ((line = in.readLine()) != null) {
+                System.out.println();
+                System.out.println(line);
+                System.out.print("> ");
+            }
+
+        } catch (IOException e) {
+            System.out.println("Conexão com servidor encerrada.");
+        }
+    }
+}
+
+9.4 Sobre preservar comando digitado
+O requisito diz:
+Quando o usuário estiver escrevendo um comando e receber uma mensagem,
+a string do comando que estava escrevendo deve ser guardada,
+a mensagem recebida deve ser exibida
+e o comando deve voltar para a tela.
+
+Em console Java puro, isso é difícil usando apenas System.in, porque o Java padrão não controla bem o conteúdo que o usuário já digitou na linha atual.
+Há três abordagens possíveis:
+Opção simples
+Fazer:
+System.out.println();
+System.out.println(mensagemRecebida);
+System.out.print("> ");
+
+Isso não preserva perfeitamente a linha digitada, mas é aceitável em muitos trabalhos introdutórios.
+Opção melhor
+Usar biblioteca como JLine, que permite manipular a linha atual do terminal.
+Opção documentada
+Explicar na documentação que o console padrão do Java limita a restauração exata da linha digitada, mas que o cliente usa uma thread separada para receber mensagens e reimprimir o prompt.
+Se quiser cumprir esse requisito com mais fidelidade, recomendo usar JLine. Mas, se o professor não pediu biblioteca externa além do SQLite, a opção simples pode ser suficiente, desde que documentada.
+9.5 Testes de aceite da Etapa 7
+[ ] Cliente conecta ao servidor.
+[ ] Cliente consegue enviar comandos.
+[ ] Cliente consegue receber mensagens sem precisar pressionar Enter.
+[ ] Dois clientes conectados conseguem interagir.
+[ ] Cliente continua podendo digitar mesmo recebendo mensagens.
+[ ] Servidor não trava quando um cliente fecha o terminal.
+
+
+10. Etapa 8 — Implementar cadastro, login, logout e status
+Essa deve ser a primeira funcionalidade real integrada entre cliente e servidor.
+10.1 Comandos
+cadastro;Nome Completo;login;email;senha
+login;login;senha
+logout
+status;OCUPADO
+status;ONLINE
+status;AUSENTE
+recuperarsenha;email
+
+10.2 Fluxo de login
+Cliente envia:
+login;robson;123
+
+Servidor:
+1. Procura usuário pelo login.
+2. Confere senha.
+3. Define status ONLINE.
+4. Registra ClientHandler no ClientSessionManager.
+5. Entrega mensagens pendentes.
+6. Responde: Login realizado com sucesso.
+
+10.3 Fluxo de logout
+Cliente envia:
+logout
+
+Servidor:
+1. Verifica usuário logado.
+2. Define status OFFLINE.
+3. Remove usuário do ClientSessionManager.
+4. Responde: Logout realizado.
+
+10.4 Testes de aceite da Etapa 8
+[ ] Cadastrar usuário novo.
+[ ] Tentar cadastrar login repetido.
+[ ] Tentar cadastrar email repetido.
+[ ] Fazer login com senha correta.
+[ ] Recusar login com senha incorreta.
+[ ] Mudar status para OCUPADO.
+[ ] Mudar status para ONLINE.
+[ ] Logout mudar status para OFFLINE.
+[ ] Recuperar senha informando email válido.
+[ ] Negar recuperação para email inexistente.
+
+
+11. Etapa 9 — Listar usuários e grupos
+11.1 Comandos
+listausuarios
+listagrupos
+listargrupo &nomegrupo
+
+11.2 Regras
+listausuarios deve mostrar apenas usuários online, conforme o enunciado:
+Ao entrar no chat, o usuário poderá listar os grupos existentes e os usuários cadastrados online.
+
+listagrupos mostra os grupos existentes.
+listargrupo &nomegrupo mostra os membros daquele grupo.
+11.3 Testes de aceite da Etapa 9
+[ ] Com dois usuários cadastrados e um online, listausuarios mostra apenas o online.
+[ ] Com dois usuários online, ambos aparecem.
+[ ] Criar grupo e verificar se aparece em listagrupos.
+[ ] Listar membros de grupo.
+[ ] Comando de grupo inexistente retorna erro amigável.
+
+
+12. Etapa 10 — Mensagem direta com aceite prévio
+Este é um ponto importante do trabalho.
+12.1 Comando
+@robson: como vc vai?
+
+12.2 Primeiro envio sem aceite
+Fluxo:
+Usuário A envia:
+@robson: como vc vai?
+
+Servidor:
+1. Verifica se A está logado.
+2. Busca usuário robson.
+3. Verifica bloqueio.
+4. Verifica se já existe aceite de conversa privada.
+5. Se não existe:
+   - cria solicitação pendente;
+   - envia para robson:
+     [PEDIDO 10] augusto quer enviar mensagem privada para você. Digite aceitar 10 ou recusar 10.
+   - responde para augusto:
+     Pedido de conversa enviado para robson. A mensagem será enviada após aceite.
+
+É melhor não entregar a mensagem original antes do aceite.
+12.3 Aceite
+robson envia:
+aceitar 10
+
+Servidor:
+1. Marca permissão como aceita.
+2. Notifica augusto.
+3. A partir desse momento, mensagens entre eles podem ser enviadas.
+
+12.4 Envios seguintes
+augusto envia:
+@robson: agora sim, tudo bem?
+
+Servidor:
+1. Verifica permissão.
+2. Verifica bloqueio.
+3. Verifica status do destinatário.
+4. Se ONLINE, entrega.
+5. Se não ONLINE, salva pendente.
+6. Retorna ao remetente:
+   Mensagem enviada para robson.
+   ou
+   robson não está online. Mensagem será entregue depois.
+
+12.5 Testes de aceite da Etapa 10
+[ ] A tenta enviar mensagem privada para B pela primeira vez.
+[ ] B recebe pedido de aceite.
+[ ] B recusa.
+[ ] A é avisado da recusa.
+[ ] A tenta novamente e novo pedido pode ser criado ou sistema informa que foi recusado.
+[ ] B aceita.
+[ ] A envia mensagem novamente.
+[ ] B recebe a mensagem sem nova pergunta.
+[ ] Se B estiver offline, mensagem fica pendente.
+[ ] Quando B logar, recebe mensagem pendente.
+
+
+13. Etapa 11 — Criar grupo
+13.1 Comando
+novogrupo amigos
+
+13.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar se grupo já existe.
+3. Criar grupo.
+4. Inserir criador no grupo.
+5. Marcar criador como administrador.
+6. Responder:
+   Grupo amigos criado. Você é administrador.
+
+13.3 Testes de aceite da Etapa 11
+[ ] Usuário logado cria grupo.
+[ ] Grupo aparece em listagrupos.
+[ ] Criador aparece em listargrupo.
+[ ] Criador é administrador.
+[ ] Não permitir grupo com nome repetido.
+[ ] Não permitir criar grupo sem estar logado.
+
+
+14. Etapa 12 — Adicionar usuário ao grupo
+14.1 Comandos
+inserir &amigos@robson
+inserir &amigos@robson,@siscoutto
+
+14.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se usuário logado é administrador do grupo.
+4. Verificar se convidados existem.
+5. Para cada convidado:
+   - se já está no grupo, informar;
+   - senão criar convite pendente.
+6. Enviar convite para cada usuário online.
+7. Se usuário estiver offline, salvar convite pendente para ser visto depois.
+
+Mensagem para convidado:
+[CONVITE 21] augusto convidou você para entrar no grupo amigos.
+Digite aceitar 21 ou recusar 21.
+
+14.3 Aceite
+aceitar 21
+
+Servidor:
+1. Marca convite como aceito.
+2. Insere usuário no grupo.
+3. Avisa o grupo:
+   robson entrou no grupo amigos.
+
+14.4 Testes de aceite da Etapa 12
+[ ] Admin convida usuário para grupo.
+[ ] Usuário recebe convite.
+[ ] Usuário aceita.
+[ ] Usuário aparece em listargrupo.
+[ ] Grupo recebe aviso de entrada.
+[ ] Usuário recusa.
+[ ] Usuário não entra no grupo.
+[ ] Usuário não admin tenta inserir alguém e recebe erro.
+[ ] Inserir vários usuários separados por vírgula.
+[ ] Usuário offline recebe convite ao entrar.
+
+
+15. Etapa 13 — Enviar mensagem para grupo
+15.1 Comando sugerido
+&amigos: olá pessoal
+
+15.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar se grupo existe.
+3. Verificar se remetente é membro.
+4. Buscar membros do grupo, exceto remetente.
+5. Para cada membro:
+   - verificar bloqueio entre remetente e membro;
+   - se bloqueado, não entregar;
+   - se ONLINE, entregar;
+   - caso contrário, salvar pendente.
+6. Retornar ao remetente lista de quem recebeu e quem não recebeu.
+
+Formato da mensagem para destinatário:
+[amigos] augusto (12:10): olá pessoal
+
+15.3 Testes de aceite da Etapa 13
+[ ] Membro envia mensagem ao grupo.
+[ ] Todos os outros membros online recebem.
+[ ] Remetente recebe confirmação de entrega.
+[ ] Usuário offline não recebe na hora.
+[ ] Usuário offline recebe depois ao ficar online.
+[ ] Usuário bloqueado não recebe.
+[ ] Usuário não membro não consegue enviar para o grupo.
+
+
+16. Etapa 14 — Mensagem direta dentro do grupo
+16.1 Comandos
+&amigos@robson: olá, como vc vai robson
+&amigos@robson,@siscoutto: olá galera
+
+16.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se remetente é membro do grupo.
+4. Verificar se destinatários são membros do grupo.
+5. Para cada destinatário:
+   - verificar bloqueio;
+   - verificar status;
+   - entregar ou salvar pendente.
+6. Retornar ao remetente quem recebeu e quem não recebeu.
+
+Formato para destinatário:
+[amigos | privada] augusto (12:10): olá, como vc vai robson
+
+16.3 Testes de aceite da Etapa 14
+[ ] Enviar mensagem para um usuário específico do grupo.
+[ ] Apenas esse usuário recebe.
+[ ] Enviar para dois usuários separados por vírgula.
+[ ] Apenas os dois recebem.
+[ ] Usuário fora do grupo não pode ser destinatário.
+[ ] Bloqueio impede entrega.
+[ ] Offline recebe depois.
+
+
+17. Etapa 15 — Solicitar entrada em grupo existente
+17.1 Comando
+entrar &amigos
+
+17.2 Regra do enunciado
+Para um usuário entrar em um grupo existente,
+todos os usuários atuais devem aceitar.
+Caso contrário, a entrada é negada.
+
+17.3 Fluxo
+1. Usuário solicita entrada.
+2. Sistema verifica se grupo existe.
+3. Sistema verifica se usuário ainda não é membro.
+4. Sistema cria uma solicitação geral.
+5. Sistema cria confirmações pendentes para cada membro atual.
+6. Cada membro recebe:
+   [SOLICITAÇÃO 30] joao quer entrar no grupo amigos.
+   Digite aceitar 30 ou recusar 30.
+7. Se todos aceitarem:
+   - joao entra no grupo;
+   - grupo é avisado.
+8. Se um recusar:
+   - joao não entra;
+   - joao é avisado;
+   - demais pendências podem ser canceladas.
+
+17.4 Modelagem sugerida
+A tabela pending_requests pode guardar:
+request_type = GROUP_JOIN_APPROVAL
+requester_user_id = usuário que quer entrar
+target_user_id = membro que precisa aprovar
+group_id = grupo
+status = PENDING / ACCEPTED / REJECTED / CANCELLED
+
+Para verificar se todos aceitaram:
+SELECT COUNT(*) FROM pending_requests
+WHERE requester_user_id = ?
+AND group_id = ?
+AND request_type = 'GROUP_JOIN_APPROVAL'
+AND status = 'PENDING';
+
+Se não houver pendentes e não houver rejeitados, adiciona ao grupo.
+17.5 Testes de aceite da Etapa 15
+[ ] Usuário solicita entrada em grupo.
+[ ] Todos os membros recebem solicitação.
+[ ] Um membro aceita, mas usuário ainda não entra.
+[ ] Último membro aceita, usuário entra.
+[ ] Se um membro recusar, usuário é negado.
+[ ] Solicitações restantes são canceladas após recusa.
+[ ] Usuário já membro não pode solicitar entrada novamente.
+
+
+18. Etapa 16 — Promover administrador
+18.1 Comando sugerido
+promover &amigos@robson
+
+18.2 Regra
+Um administrador pode convidar outro membro para ser administrador.
+O usuário convidado deve aceitar.
+
+18.3 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se remetente é administrador.
+4. Verificar se o alvo é membro do grupo.
+5. Criar convite de promoção.
+6. Usuário alvo recebe:
+   [ADMIN 40] augusto quer tornar você administrador do grupo amigos.
+   Digite aceitar 40 ou recusar 40.
+7. Se aceitar, marcar is_admin = 1.
+8. Avisar grupo.
+
+18.4 Testes de aceite da Etapa 16
+[ ] Admin convida membro para ser admin.
+[ ] Membro aceita.
+[ ] Membro vira admin.
+[ ] Novo admin consegue adicionar usuários.
+[ ] Membro recusa.
+[ ] Membro continua sem permissão de admin.
+[ ] Usuário não admin não pode promover.
+
+
+19. Etapa 17 — Sair do grupo
+19.1 Comando
+sair &amigos
+
+19.2 Fluxo
+1. Verificar usuário logado.
+2. Verificar grupo.
+3. Verificar se usuário é membro.
+4. Remover usuário do grupo.
+5. Avisar todos os participantes:
+   robson saiu do grupo amigos.
+
+19.3 Caso especial: administrador único
+Você precisa decidir uma regra e documentar.
+Sugestões:
+Opção A — impedir saída do último administrador
+Você é o único administrador. Promova outro usuário antes de sair.
+
+Opção B — transferir administração automaticamente
+O membro mais antigo vira administrador.
+
+Recomendo a opção A, porque é mais simples e explícita.
+19.4 Testes de aceite da Etapa 17
+[ ] Usuário sai do grupo.
+[ ] Usuário não aparece mais na lista.
+[ ] Demais membros recebem aviso.
+[ ] Usuário que saiu não recebe novas mensagens.
+[ ] Último administrador não consegue sair sem promover outro.
+
+
+20. Etapa 18 — Bloqueio de usuários
+20.1 Comandos
+bloquear @robson
+desbloquear @robson
+
+20.2 Regra
+Se A bloqueia B:
+- B não consegue mandar mensagem direta para A.
+- A não consegue mandar mensagem direta para B.
+- Mensagens de B em grupo não chegam para A.
+- Mensagens de A em grupo não chegam para B.
+- Mensagens diretas dentro do grupo também são bloqueadas.
+
+20.3 Testes de aceite da Etapa 18
+[ ] A bloqueia B.
+[ ] B tenta mandar mensagem direta para A e falha.
+[ ] A tenta mandar mensagem direta para B e falha.
+[ ] A e B estão no mesmo grupo.
+[ ] B manda mensagem no grupo.
+[ ] Todos recebem, menos A.
+[ ] A manda mensagem no grupo.
+[ ] Todos recebem, menos B.
+[ ] A desbloqueia B.
+[ ] Mensagens voltam a ser entregues.
+
+
+21. Etapa 19 — Mensagens offline
+Este requisito aparece várias vezes no enunciado.
+21.1 Regra
+Se o destinatário não estiver ONLINE, a mensagem deve ser salva.
+Quando ele ficar ONLINE, o servidor entrega as mensagens pendentes.
+
+Isso vale para:
+- mensagem direta;
+- mensagem de grupo;
+- mensagem direta dentro do grupo;
+- convites;
+- solicitações;
+- avisos importantes.
+
+21.2 Fluxo de entrega pendente
+Quando usuário faz login ou muda status para ONLINE:
+1. Buscar entregas pendentes do usuário.
+2. Para cada entrega:
+   - enviar pelo ClientSessionManager;
+   - marcar como entregue.
+3. Informar:
+   Você recebeu X mensagens pendentes.
+
+21.3 Testes de aceite da Etapa 19
+[ ] B está offline.
+[ ] A envia mensagem direta para B.
+[ ] A recebe aviso de que B receberá depois.
+[ ] B faz login.
+[ ] B recebe mensagem pendente.
+[ ] Mensagem é marcada como entregue.
+[ ] B faz logout e login novamente.
+[ ] A mesma mensagem não é entregue de novo.
+
+
+22. Etapa 20 — Confirmação de entrega ao remetente
+O enunciado pede:
+Quando usuário A enviar mensagem privada ou de grupo,
+deve retornar uma mensagem para A indicando quem recebeu ou não recebeu.
+
+22.1 Exemplo em mensagem direta
+Mensagem enviada para robson.
+
+Ou:
+robson não está online. A mensagem será entregue quando ele entrar.
+
+Ou:
+Mensagem não enviada para robson: usuário bloqueado.
+
+22.2 Exemplo em grupo
+Resultado do envio para o grupo amigos:
+Receberam agora: robson, maria
+Receberão depois: joao
+Não receberam: siscoutto bloqueado
+
+22.3 Testes de aceite da Etapa 20
+[ ] Remetente recebe confirmação em mensagem direta.
+[ ] Remetente recebe lista de entrega em grupo.
+[ ] Remetente recebe lista de pendentes.
+[ ] Remetente recebe lista de bloqueados/não entregues.
+
+
+23. Etapa 21 — Ajustar concorrência e segurança de threads
+Como o servidor é multithread, alguns pontos precisam de cuidado.
+23.1 Use ConcurrentHashMap para sessões
+private final Map<Integer, ClientHandler> onlineClients = new ConcurrentHashMap<>();
+
+23.2 Evite compartilhar Connection global
+Para SQLite, prefira abrir conexão por operação no repositório:
+try (Connection conn = Database.getConnection()) {
+    // operação
+}
+
+23.3 Sincronizar operações críticas
+Algumas operações podem precisar de synchronized, por exemplo:
+- aceitar convite;
+- criar grupo com nome único;
+- processar entrada em grupo que depende de todos aceitarem;
+- entregar mensagens pendentes.
+
+Não precisa sincronizar tudo. Sincronize apenas operações que podem gerar inconsistência.
+23.4 Testes de aceite da Etapa 21
+[ ] Dois clientes fazem login simultaneamente.
+[ ] Dois clientes enviam mensagens ao mesmo tempo.
+[ ] Dois usuários respondem solicitação de entrada quase ao mesmo tempo.
+[ ] Servidor não gera exceção.
+[ ] Banco não fica com dados duplicados indevidos.
+
+
+24. Ordem recomendada de implementação
+Uma ordem realista:
+1. Criar projeto Java.
+2. Configurar SQLite.
+3. Criar tabelas.
+4. Criar modelos.
+5. Criar repositórios.
+6. Criar serviços de usuário.
+7. Criar parser de comandos.
+8. Criar servidor TCP simples.
+9. Criar cliente TCP simples.
+10. Integrar cadastro/login/logout.
+11. Integrar listausuarios/listagrupos.
+12. Implementar mensagens diretas com aceite.
+13. Implementar mensagens offline.
+14. Implementar criação de grupos.
+15. Implementar convite para grupo.
+16. Implementar mensagens de grupo.
+17. Implementar mensagens diretas dentro do grupo.
+18. Implementar solicitação de entrada em grupo.
+19. Implementar promoção de administrador.
+20. Implementar saída de grupo.
+21. Implementar bloqueios.
+22. Revisar confirmações de entrega.
+23. Testar com vários clientes.
+24. Escrever documentação final.
+
+
+25. Sugestão de protocolo de resposta do servidor
+Para deixar o cliente simples, o servidor pode enviar tudo como texto comum.
+Exemplos:
+[OK] Login realizado com sucesso.
+[ERRO] Senha incorreta.
+[SISTEMA] robson entrou no grupo amigos.
+[PRIVADO] augusto (12:10): olá
+[GRUPO amigos] maria (12:11): bom dia
+[GRUPO amigos | PRIVADO] joao (12:12): mensagem só para você
+[CONVITE 15] augusto quer conversar em privado. Digite aceitar 15 ou recusar 15.
+
+Isso facilita muito a implementação do cliente, porque ele apenas imprime o que o servidor mandar.
+
+26. Documentação final do projeto
+No arquivo docs/documentacao.md, documente:
+1. Objetivo do projeto.
+2. Arquitetura geral.
+3. Como funciona o servidor.
+4. Como funciona o cliente.
+5. Como as threads foram usadas.
+6. Como os sockets TCP foram usados.
+7. Como o banco SQLite foi usado.
+8. Modelo das tabelas.
+9. Lista de comandos.
+10. Fluxo de login/logout.
+11. Fluxo de mensagem privada.
+12. Fluxo de grupo.
+13. Fluxo de bloqueio.
+14. Fluxo de mensagens offline.
+15. Limitações conhecidas.
+16. Como compilar.
+17. Como executar.
+18. Testes realizados.
+
+Exemplo de trecho:
+O servidor utiliza um ServerSocket na porta 6789. A thread principal fica bloqueada em accept(), aguardando novas conexões. Quando um cliente se conecta, o servidor cria uma nova Thread executando um ClientHandler. Cada ClientHandler é responsável por ler comandos daquele cliente, enviar respostas e manter a sessão associada ao usuário logado.
+
+
+27. Plano mínimo viável para entregar primeiro
+Se o prazo apertar, implemente primeiro nesta ordem:
+1. Cadastro/login/logout.
+2. Servidor multithread.
+3. Cliente com thread de envio e thread de recebimento.
+4. Mensagem direta.
+5. Mensagem offline.
+6. Criar grupo.
+7. Enviar mensagem para grupo.
+8. Listar usuários e grupos.
+9. Bloqueio.
+10. Convites e aceitações.
+
+Depois complete:
+- solicitação de entrada com aceite de todos;
+- promoção de administrador com aceite;
+- mensagem direta para usuários específicos dentro do grupo;
+- preservação visual da linha digitada no console.
+
+
+28. Critério de pronto por etapa
+Uma funcionalidade só deve ser considerada pronta quando:
+[ ] Funciona com um cliente.
+[ ] Funciona com dois clientes.
+[ ] Funciona com três ou mais clientes.
+[ ] Salva corretamente no SQLite.
+[ ] Continua funcionando após reiniciar o servidor.
+[ ] Trata erro de comando inválido.
+[ ] Trata usuário inexistente.
+[ ] Trata usuário offline.
+[ ] Respeita bloqueios.
+[ ] Responde ao remetente com sucesso ou falha.
+
+
+29. Resumo da implementação ideal
+O projeto deve terminar com este comportamento:
+Servidor:
+- Fica aguardando conexões TCP.
+- Para cada cliente conectado, cria uma thread.
+- Cada thread interpreta comandos e usa os serviços do núcleo.
+- O núcleo grava e consulta dados no SQLite.
+- O servidor entrega mensagens em tempo real para usuários online.
+- O servidor salva mensagens para usuários não online.
+- Ao login, o servidor entrega pendências.
+
+Cliente:
+- Conecta ao servidor por TCP.
+- Uma thread lê teclado e envia comandos.
+- Outra thread recebe mensagens do servidor.
+- O console mostra mensagens privadas, grupos, convites e erros.
+
+Esse caminho evita tentar implementar tudo de uma vez. Primeiro você constrói uma base estável, depois adiciona funcionalidades mais complexas como grupos, bloqueios, aceite de convites e mensagens offline.
+

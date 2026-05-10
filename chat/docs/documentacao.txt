@@ -1,0 +1,117 @@
+ETAPA 1 - Criacao do banco SQLite
+
+Nesta etapa foi criada a estrutura inicial do banco de dados SQLite do projeto.
+
+O arquivo do banco fica localizado em:
+
+database/chat.db
+
+Foi criada a classe DatabaseConnection, responsavel por fornecer conexao com o banco SQLite usando JDBC.
+
+Tambem foi criada a classe DatabaseInitializer, responsavel por criar automaticamente as tabelas necessarias do sistema quando a aplicacao e iniciada.
+
+Tabelas criadas:
+
+1. users
+   Guarda os dados dos usuarios cadastrados, incluindo nome completo, login, email, senha e status.
+
+2. blocks
+   Guarda os bloqueios entre usuarios.
+
+3. direct_permissions
+   Guarda as permissoes de conversa privada entre usuarios.
+
+4. groups_chat
+   Guarda os grupos criados no chat.
+
+5. group_members
+   Guarda os membros dos grupos e informa se cada membro e administrador.
+
+6. messages
+   Guarda as mensagens enviadas no sistema.
+
+7. message_deliveries
+   Guarda o controle de entrega das mensagens, permitindo identificar mensagens entregues e mensagens pendentes.
+
+8. pending_requests
+   Guarda convites e solicitacoes pendentes, como convite para grupo, pedido de conversa privada, solicitacao de entrada em grupo e convite para ser administrador.
+
+Ao executar a classe App, o sistema inicializa o banco e cria as tabelas automaticamente caso elas ainda nao existam.
+
+ETAPA 2 - Criacao dos modelos Java
+
+Nesta etapa foram criadas as classes que representam os principais dados do sistema.
+
+Foi criado o pacote:
+
+br.edu.chat.model
+
+Classes e enums criados:
+
+1. UserStatus
+   Enum que representa os status possiveis de um usuario:
+   ONLINE, OFFLINE, OCUPADO e AUSENTE.
+
+2. MessageType
+   Enum que representa os tipos de mensagens do sistema:
+   DIRECT, GROUP, GROUP_DIRECT, SYSTEM, INVITE e REQUEST.
+
+3. User
+   Classe que representa um usuario do chat.
+   Possui id, nome completo, login, email, senha e status.
+
+4. Group
+   Classe que representa um grupo do chat.
+   Possui id, nome do grupo e id do usuario criador.
+
+5. Message
+   Classe que representa uma mensagem.
+   Possui id, usuario remetente, usuario destinatario, grupo, conteudo, tipo da mensagem e data de criacao.
+
+As classes de modelo nao possuem dependencia de socket, console ou banco de dados.
+Elas apenas representam dados usados pelo sistema.
+
+Tambem foi criada a classe temporaria ModelTest, usada para testar a criacao de objetos User, Group e Message.
+
+Foi criada a classe temporaria DatabaseUserTest, usada para inserir e consultar um usuario no banco SQLite usando JDBC diretamente.
+Essa classe confirmou que o banco chat.db esta funcionando corretamente.
+Posteriormente essa logica sera movida para a camada de repositorios.
+
+ETAPA 3 - Camada de persistencia
+
+Nesta etapa foi criada a camada de repositorios do sistema.
+
+A camada de persistencia tem a responsabilidade de isolar o acesso ao banco de dados SQLite. Assim, as outras partes do sistema nao precisam escrever SQL diretamente.
+
+Foram criados os seguintes repositorios:
+
+1. UserRepository
+   Responsavel por cadastrar usuarios, buscar usuarios por login, email ou id, listar todos os usuarios, listar usuarios online, atualizar status e verificar existencia de login ou email.
+
+2. GroupRepository
+   Responsavel por criar grupos, buscar grupos por nome, listar grupos, adicionar membros, remover membros, listar membros, listar administradores, verificar se um usuario e membro, verificar se um usuario e administrador e tornar um usuario administrador.
+
+3. MessageRepository
+   Responsavel por salvar mensagens, salvar entregas de mensagens, consultar mensagens pendentes de um usuario e marcar mensagens como entregues.
+
+4. BlockRepository
+   Responsavel por bloquear usuarios, desbloquear usuarios e verificar se existe bloqueio entre dois usuarios.
+
+Tambem foi criada a classe MessageDelivery, que representa uma mensagem pendente de entrega para um usuario.
+
+Foi criada a classe temporaria RepositoryTestMain para testar a camada de repositorios.
+
+Testes realizados:
+- cadastro de usuarios;
+- busca de usuario por login;
+- alteracao de status para ONLINE;
+- listagem de usuarios online;
+- criacao de grupo;
+- insercao do criador como administrador;
+- listagem de grupos;
+- listagem de membros do grupo;
+- criacao de bloqueio entre usuarios;
+- verificacao de bloqueio nos dois sentidos;
+- salvamento de mensagem pendente;
+- consulta de mensagens pendentes;
+- marcacao de mensagem como entregue.
