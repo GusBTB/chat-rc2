@@ -1,0 +1,35 @@
+package br.edu.chat.protocol;
+
+public enum CommandType {
+
+    CADASTRO,
+    LOGIN,
+    LOGOUT,
+    RECUPERAR_SENHA,
+    STATUS,
+
+    LISTA_USUARIOS,
+    LISTA_GRUPOS,
+    LISTAR_GRUPO,
+
+    DIRECT_MESSAGE,
+    GROUP_MESSAGE,
+    GROUP_DIRECT_MESSAGE,
+
+    NOVO_GRUPO,
+    INSERIR_GRUPO,
+    ENTRAR_GRUPO,
+    SAIR_GRUPO,
+    PROMOVER_ADMIN,
+
+    BLOQUEAR,
+    DESBLOQUEAR,
+
+    ACEITAR,
+    RECUSAR,
+
+    AJUDA,
+
+    INVALID,
+    UNKNOWN
+}

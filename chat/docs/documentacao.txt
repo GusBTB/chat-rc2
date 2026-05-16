@@ -115,3 +115,81 @@ Testes realizados:
 - salvamento de mensagem pendente;
 - consulta de mensagens pendentes;
 - marcacao de mensagem como entregue.
+
+ETAPA 4 - Protocolo textual e parser de comandos
+
+Nesta etapa foi criada a camada de protocolo do sistema, responsavel por interpretar as linhas de texto digitadas pelo usuario e transformar essas linhas em objetos de comando que poderao ser processados pelo nucleo da aplicacao.
+
+Foi criado o pacote:
+
+br.edu.chat.protocol
+
+Classes e enums criados:
+
+1. CommandType
+   Enum que representa todos os tipos de comandos aceitos pelo sistema:
+   CADASTRO, LOGIN, LOGOUT, RECUPERAR_SENHA, STATUS,
+   LISTA_USUARIOS, LISTA_GRUPOS, LISTAR_GRUPO,
+   DIRECT_MESSAGE, GROUP_MESSAGE, GROUP_DIRECT_MESSAGE,
+   NOVO_GRUPO, INSERIR_GRUPO, ENTRAR_GRUPO, SAIR_GRUPO, PROMOVER_ADMIN,
+   BLOQUEAR, DESBLOQUEAR,
+   ACEITAR, RECUSAR,
+   AJUDA, INVALID, UNKNOWN.
+
+2. ClientCommand
+   Classe imutavel que representa um comando ja interpretado.
+   Possui o tipo do comando, a linha original, uma lista de argumentos,
+   uma lista de usuarios alvo, o nome do grupo, o conteudo da mensagem,
+   o id de pedido (para aceitar/recusar) e uma mensagem de erro quando aplicavel.
+   A construcao e feita por meio de Builder interno.
+
+3. CommandParser
+   Classe responsavel por receber uma linha de texto e retornar um ClientCommand.
+   Reconhece os formatos descritos no enunciado do trabalho:
+   - cadastro;Nome;login;email;senha
+   - login;login;senha
+   - logout
+   - recuperarsenha;email
+   - status;ONLINE | OFFLINE | OCUPADO | AUSENTE
+   - listausuarios
+   - listagrupos
+   - listargrupo &nomegrupo
+   - novogrupo nomegrupo
+   - inserir &nomegrupo@usuario1,@usuario2
+   - entrar &nomegrupo
+   - sair &nomegrupo
+   - promover &nomegrupo@usuario
+   - bloquear @usuario
+   - desbloquear @usuario
+   - aceitar id
+   - recusar id
+   - @usuario: mensagem
+   - &grupo: mensagem
+   - &grupo@usuario1,@usuario2: mensagem
+   - ajuda
+   Comandos invalidos retornam um ClientCommand do tipo INVALID, com mensagem de erro amigavel.
+   Comandos nao reconhecidos retornam um ClientCommand do tipo UNKNOWN.
+
+4. ServerResponse
+   Classe utilitaria com prefixos e formatadores para mensagens enviadas pelo servidor.
+   Define prefixos padronizados como [OK], [ERRO], [INFO], [SISTEMA], [CONVITE id], [PEDIDO id] e [SOLICITACAO id].
+   Possui metodos para formatar mensagens diretas, mensagens de grupo e mensagens diretas dentro de grupo.
+
+Foi criada a classe temporaria CommandParserTest, com 44 verificacoes que cobrem cada formato de comando, casos com erro (campos vazios, formato incorreto, status invalido, id nao numerico, comando vazio ou nulo) e os casos UNKNOWN.
+
+Testes realizados (todos passaram):
+- reconhecimento de cadastro, login, logout, recuperarsenha e status;
+- reconhecimento de listausuarios, listagrupos e listargrupo;
+- reconhecimento de mensagem direta @usuario: mensagem;
+- reconhecimento de novogrupo, inserir (um e varios usuarios), entrar, sair e promover;
+- reconhecimento de mensagem de grupo &grupo: mensagem;
+- reconhecimento de mensagem direta em grupo &grupo@usuario: mensagem;
+- reconhecimento de mensagem direta em grupo para varios &grupo@u1,@u2: mensagem;
+- reconhecimento de bloquear e desbloquear;
+- reconhecimento de aceitar e recusar com id numerico;
+- retorno INVALID para campos faltando, formato errado, mensagem vazia, status invalido, id nao numerico;
+- retorno UNKNOWN para comando inexistente;
+- retorno INVALID para comando vazio e para entrada nula.
+
+Esta camada nao depende de socket nem de banco de dados.
+Ela apenas converte texto em objetos de comando, deixando o nucleo da aplicacao livre para tomar decisoes sobre cada comando recebido.
