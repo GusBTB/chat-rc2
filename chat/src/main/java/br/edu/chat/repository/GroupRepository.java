@@ -73,6 +73,35 @@ public class GroupRepository {
         return null;
     }
 
+    public Group findById(int id) {
+        String sql = """
+                SELECT id, name, created_by_user_id
+                FROM groups_chat
+                WHERE id = ?;
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setInt(1, id);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    return new Group(
+                            resultSet.getInt("id"),
+                            resultSet.getString("name"),
+                            resultSet.getInt("created_by_user_id"));
+                }
+            }
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao buscar grupo por id.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return null;
+    }
+
     public List<Group> listGroups() {
         String sql = """
                 SELECT id, name, created_by_user_id
