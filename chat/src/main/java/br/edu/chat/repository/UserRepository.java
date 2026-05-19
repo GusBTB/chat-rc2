@@ -3,6 +3,7 @@ package br.edu.chat.repository;
 import br.edu.chat.database.DatabaseConnection;
 import br.edu.chat.model.User;
 import br.edu.chat.model.UserStatus;
+import br.edu.chat.util.PasswordUtils;
 
 import java.sql.*;
 import java.time.LocalDateTime;
@@ -29,7 +30,7 @@ public class UserRepository {
             statement.setString(1, user.getFullName());
             statement.setString(2, user.getLogin());
             statement.setString(3, user.getEmail());
-            statement.setString(4, user.getPassword());
+            statement.setString(4, PasswordUtils.hash(user.getPassword()));
             statement.setString(5, user.getStatus().name());
             statement.setString(6, LocalDateTime.now().toString());
 
