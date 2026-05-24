@@ -19,9 +19,10 @@ public class RequestRepository {
                     requester_user_id,
                     target_user_id,
                     group_id,
+                    pending_message_id,
                     status,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?);
                 """;
 
         try (Connection connection = DatabaseConnection.getConnection();
@@ -29,21 +30,18 @@ public class RequestRepository {
 
             statement.setString(1, request.getRequestType().name());
             statement.setInt(2, request.getRequesterUserId());
+            setNullableInt(statement, 3, request.getTargetUserId());
+            setNullableInt(statement, 4, request.getGroupId());
+            setNullableInt(statement, 5, request.getPendingMessageId());
+            statement.setString(6, request.getStatus().name());
 
-            if (request.getTargetUserId() != null) {
-                statement.setInt(3, request.getTargetUserId());
-            } else {
-                statement.setNull(3, Types.INTEGER);
+            String createdAt = request.getCreatedAt();
+            if (createdAt == null || createdAt.isBlank()) {
+                createdAt = LocalDateTime.now().toString();
+                request.setCreatedAt(createdAt);
             }
 
-            if (request.getGroupId() != null) {
-                statement.setInt(4, request.getGroupId());
-            } else {
-                statement.setNull(4, Types.INTEGER);
-            }
-
-            statement.setString(5, request.getStatus().name());
-            statement.setString(6, LocalDateTime.now().toString());
+            statement.setString(7, createdAt);
 
             statement.executeUpdate();
 
@@ -65,7 +63,8 @@ public class RequestRepository {
 
     public PendingRequest findById(int id) {
         String sql = """
-                SELECT id, request_type, requester_user_id, target_user_id, group_id, status, created_at
+                SELECT id, request_type, requester_user_id, target_user_id, group_id,
+                       pending_message_id, status, created_at
                 FROM pending_requests
                 WHERE id = ?;
                 """;
@@ -91,7 +90,8 @@ public class RequestRepository {
 
     public List<PendingRequest> findPendingByTarget(int targetUserId) {
         String sql = """
-                SELECT id, request_type, requester_user_id, target_user_id, group_id, status, created_at
+                SELECT id, request_type, requester_user_id, target_user_id, group_id,
+                       pending_message_id, status, created_at
                 FROM pending_requests
                 WHERE target_user_id = ?
                 AND status = 'PENDING';
@@ -120,7 +120,8 @@ public class RequestRepository {
 
     public List<PendingRequest> findPendingByRequester(int requesterUserId) {
         String sql = """
-                SELECT id, request_type, requester_user_id, target_user_id, group_id, status, created_at
+                SELECT id, request_type, requester_user_id, target_user_id, group_id,
+                       pending_message_id, status, created_at
                 FROM pending_requests
                 WHERE requester_user_id = ?
                 AND status = 'PENDING';
@@ -147,6 +148,130 @@ public class RequestRepository {
         return requests;
     }
 
+    public boolean existsPending(RequestType requestType, int requesterUserId, Integer targetUserId, Integer groupId) {
+        String sql = """
+                SELECT 1
+                FROM pending_requests
+                WHERE request_type = ?
+                AND requester_user_id = ?
+                AND status = 'PENDING'
+                AND (
+                    (? IS NULL AND target_user_id IS NULL)
+                    OR target_user_id = ?
+                )
+                AND (
+                    (? IS NULL AND group_id IS NULL)
+                    OR group_id = ?
+                );
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setString(1, requestType.name());
+            statement.setInt(2, requesterUserId);
+            setNullableInt(statement, 3, targetUserId);
+            setNullableInt(statement, 4, targetUserId);
+            setNullableInt(statement, 5, groupId);
+            setNullableInt(statement, 6, groupId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao verificar pedido pendente.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return false;
+    }
+
+    public boolean existsPendingGroupJoinForRequester(int requesterUserId, int groupId) {
+        String sql = """
+                SELECT 1
+                FROM pending_requests
+                WHERE request_type = 'GROUP_JOIN'
+                AND requester_user_id = ?
+                AND group_id = ?
+                AND status = 'PENDING';
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setInt(1, requesterUserId);
+            statement.setInt(2, groupId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao verificar pedido pendente de entrada no grupo.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return false;
+    }
+
+    public int countPendingGroupJoinApprovals(int requesterUserId, int groupId) {
+        String sql = """
+                SELECT COUNT(*) AS total
+                FROM pending_requests
+                WHERE request_type = 'GROUP_JOIN'
+                AND requester_user_id = ?
+                AND group_id = ?
+                AND status = 'PENDING';
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setInt(1, requesterUserId);
+            statement.setInt(2, groupId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    return resultSet.getInt("total");
+                }
+            }
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao contar aprovacoes pendentes de entrada no grupo.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return 0;
+    }
+
+    public boolean refusePendingGroupJoinApprovals(int requesterUserId, int groupId) {
+        String sql = """
+                UPDATE pending_requests
+                SET status = 'REFUSED'
+                WHERE request_type = 'GROUP_JOIN'
+                AND requester_user_id = ?
+                AND group_id = ?
+                AND status = 'PENDING';
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setInt(1, requesterUserId);
+            statement.setInt(2, groupId);
+
+            statement.executeUpdate();
+            return true;
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao cancelar aprovacoes pendentes de entrada no grupo.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return false;
+    }
+
     public boolean updateStatus(int id, RequestStatus status) {
         String sql = """
                 UPDATE pending_requests
@@ -170,19 +295,27 @@ public class RequestRepository {
         return false;
     }
 
+    private void setNullableInt(PreparedStatement statement, int index, Integer value) throws SQLException {
+        if (value == null) {
+            statement.setNull(index, Types.INTEGER);
+        } else {
+            statement.setInt(index, value);
+        }
+    }
+
+    private Integer getNullableInt(ResultSet resultSet, String columnName) throws SQLException {
+        int value = resultSet.getInt(columnName);
+        return resultSet.wasNull() ? null : value;
+    }
+
     private PendingRequest mapResultSet(ResultSet resultSet) throws SQLException {
-        int targetId = resultSet.getInt("target_user_id");
-        Integer targetUserId = resultSet.wasNull() ? null : targetId;
-
-        int gId = resultSet.getInt("group_id");
-        Integer groupId = resultSet.wasNull() ? null : gId;
-
         return new PendingRequest(
                 resultSet.getInt("id"),
                 RequestType.valueOf(resultSet.getString("request_type")),
                 resultSet.getInt("requester_user_id"),
-                targetUserId,
-                groupId,
+                getNullableInt(resultSet, "target_user_id"),
+                getNullableInt(resultSet, "group_id"),
+                getNullableInt(resultSet, "pending_message_id"),
                 RequestStatus.valueOf(resultSet.getString("status")),
                 resultSet.getString("created_at"));
     }

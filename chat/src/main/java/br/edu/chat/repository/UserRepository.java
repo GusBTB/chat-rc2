@@ -255,6 +255,74 @@ public class UserRepository {
         return false;
     }
 
+    public boolean updatePassword(int userId, String newPassword) {
+        String sql = """
+                UPDATE users
+                SET password = ?
+                WHERE id = ?;
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setString(1, PasswordUtils.hash(newPassword));
+            statement.setInt(2, userId);
+
+            return statement.executeUpdate() > 0;
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao atualizar senha do usuario.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return false;
+    }
+
+    public boolean existsFullName(String fullName) {
+        String sql = """
+                SELECT 1
+                FROM users
+                WHERE full_name = ?;
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setString(1, fullName);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao verificar nome completo.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return false;
+    }
+
+    public boolean updateAllStatuses(UserStatus status) {
+        String sql = """
+                UPDATE users
+                SET status = ?;
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setString(1, status.name());
+            statement.executeUpdate();
+            return true;
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao atualizar status de todos os usuarios.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return false;
+    }
+
     private User mapResultSetToUser(ResultSet resultSet) throws SQLException {
         return new User(
                 resultSet.getInt("id"),

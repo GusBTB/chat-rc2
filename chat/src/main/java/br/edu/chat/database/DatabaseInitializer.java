@@ -1,6 +1,7 @@
 package br.edu.chat.database;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
@@ -19,6 +20,7 @@ public class DatabaseInitializer {
             createMessagesTable(statement);
             createMessageDeliveriesTable(statement);
             createPendingRequestsTable(statement);
+            ensurePendingRequestsPendingMessageIdColumn(connection, statement);
 
             System.out.println("[OK] Banco de dados inicializado com sucesso.");
 
@@ -164,15 +166,44 @@ public class DatabaseInitializer {
                     requester_user_id INTEGER NOT NULL,
                     target_user_id INTEGER,
                     group_id INTEGER,
+                    pending_message_id INTEGER,
                     status TEXT NOT NULL DEFAULT 'PENDING',
                     created_at TEXT NOT NULL,
 
                     FOREIGN KEY(requester_user_id) REFERENCES users(id),
                     FOREIGN KEY(target_user_id) REFERENCES users(id),
-                    FOREIGN KEY(group_id) REFERENCES groups_chat(id)
+                    FOREIGN KEY(group_id) REFERENCES groups_chat(id),
+                    FOREIGN KEY(pending_message_id) REFERENCES messages(id)
                 );
                 """;
 
         statement.execute(sql);
     }
+
+    private static void ensurePendingRequestsPendingMessageIdColumn(Connection connection, Statement statement)
+            throws SQLException {
+        if (!columnExists(connection, "pending_requests", "pending_message_id")) {
+            statement.execute("ALTER TABLE pending_requests ADD COLUMN pending_message_id INTEGER;");
+        }
+    }
+
+    private static boolean columnExists(Connection connection, String tableName, String columnName)
+            throws SQLException {
+        String sql = "PRAGMA table_info(" + tableName + ");";
+
+        try (Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery(sql)) {
+
+            while (resultSet.next()) {
+                String currentColumn = resultSet.getString("name");
+
+                if (columnName.equalsIgnoreCase(currentColumn)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
 }

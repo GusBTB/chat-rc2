@@ -3,5 +3,6 @@ package br.edu.chat.model;
 public enum RequestType {
     PERMISSION,
     INVITE,
-    GROUP_JOIN
+    GROUP_JOIN,
+    ADMIN_PROMOTION
 }

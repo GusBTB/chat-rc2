@@ -2230,7 +2230,11 @@ listargrupo &nomegrupo mostra os membros daquele grupo.
 
 
 12. Etapa 10 — Mensagem direta com aceite prévio
-Este é um ponto importante do trabalho.
+Este é um ponto importante do trabalho. Considerar o ponto em aberto deixado para essa etapa: 
+Correcao futura recomendada para a etapa 10:
+Ajustar a modelagem dos pedidos de mensagem direta para armazenar a primeira mensagem enquanto o pedido estiver pendente.
+Uma alternativa e associar um message_id ao pedido pendente ou criar uma estrutura especifica para guardar a mensagem inicial ate o aceite do destinatario.
+
 12.1 Comando
 @robson: como vc vai?
 

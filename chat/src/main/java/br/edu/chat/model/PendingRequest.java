@@ -7,6 +7,7 @@ public class PendingRequest {
     private int requesterUserId;
     private Integer targetUserId;
     private Integer groupId;
+    private Integer pendingMessageId;
     private RequestStatus status;
     private String createdAt;
 
@@ -15,21 +16,35 @@ public class PendingRequest {
 
     public PendingRequest(RequestType requestType, int requesterUserId,
             Integer targetUserId, Integer groupId, RequestStatus status, String createdAt) {
+        this(requestType, requesterUserId, targetUserId, groupId, null, status, createdAt);
+    }
+
+    public PendingRequest(RequestType requestType, int requesterUserId,
+            Integer targetUserId, Integer groupId, Integer pendingMessageId,
+            RequestStatus status, String createdAt) {
         this.requestType = requestType;
         this.requesterUserId = requesterUserId;
         this.targetUserId = targetUserId;
         this.groupId = groupId;
+        this.pendingMessageId = pendingMessageId;
         this.status = status;
         this.createdAt = createdAt;
     }
 
     public PendingRequest(int id, RequestType requestType, int requesterUserId,
             Integer targetUserId, Integer groupId, RequestStatus status, String createdAt) {
+        this(id, requestType, requesterUserId, targetUserId, groupId, null, status, createdAt);
+    }
+
+    public PendingRequest(int id, RequestType requestType, int requesterUserId,
+            Integer targetUserId, Integer groupId, Integer pendingMessageId,
+            RequestStatus status, String createdAt) {
         this.id = id;
         this.requestType = requestType;
         this.requesterUserId = requesterUserId;
         this.targetUserId = targetUserId;
         this.groupId = groupId;
+        this.pendingMessageId = pendingMessageId;
         this.status = status;
         this.createdAt = createdAt;
     }
@@ -74,6 +89,14 @@ public class PendingRequest {
         this.groupId = groupId;
     }
 
+    public Integer getPendingMessageId() {
+        return pendingMessageId;
+    }
+
+    public void setPendingMessageId(Integer pendingMessageId) {
+        this.pendingMessageId = pendingMessageId;
+    }
+
     public RequestStatus getStatus() {
         return status;
     }
@@ -98,6 +121,7 @@ public class PendingRequest {
                 ", requesterUserId=" + requesterUserId +
                 ", targetUserId=" + targetUserId +
                 ", groupId=" + groupId +
+                ", pendingMessageId=" + pendingMessageId +
                 ", status=" + status +
                 ", createdAt='" + createdAt + '\'' +
                 '}';

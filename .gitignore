@@ -9,10 +9,12 @@
 *.nar
 hs_err_pid*
 replay_pid*
+src.zip
 
 ##############################
 ## Maven
 ##############################
+chat/target/
 target/
 pom.xml.tag
 pom.xml.releaseBackup

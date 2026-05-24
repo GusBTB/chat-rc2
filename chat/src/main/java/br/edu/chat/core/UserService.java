@@ -9,6 +9,7 @@ import br.edu.chat.repository.MessageRepository;
 import br.edu.chat.repository.UserRepository;
 import br.edu.chat.util.PasswordUtils;
 
+import java.security.SecureRandom;
 import java.util.List;
 
 public class UserService {
@@ -35,6 +36,9 @@ public class UserService {
         }
         if (password == null || password.isBlank()) {
             return ServerResponse.error("Senha invalida.");
+        }
+        if (userRepo.existsFullName(fullName)) {
+            return ServerResponse.error("Nome completo '" + fullName + "' ja esta em uso.");
         }
 
         if (userRepo.existsLogin(login)) {
@@ -114,7 +118,16 @@ public class UserService {
             return ServerResponse.error("Nenhum usuario encontrado com esse email.");
         }
 
-        return ServerResponse.ok("Senha associada ao email '" + email + "' enviada com sucesso.");
+        String temporaryPassword = generateTemporaryPassword();
+        boolean updated = userRepo.updatePassword(user.getId(), temporaryPassword);
+
+        if (!updated) {
+            return ServerResponse.error("Nao foi possivel redefinir a senha.");
+        }
+
+        return ServerResponse.ok("Senha temporaria gerada para o login '" + user.getLogin()
+                + "': " + temporaryPassword
+                + "\nUse essa senha no proximo login e depois altere-a quando houver comando para troca de senha.");
     }
 
     public void deliverPendingMessages(User user) {
@@ -134,4 +147,18 @@ public class UserService {
             messageRepo.markDelivered(delivery.getDeliveryId());
         }
     }
+
+    private String generateTemporaryPassword() {
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        SecureRandom random = new SecureRandom();
+        StringBuilder password = new StringBuilder();
+
+        for (int i = 0; i < 8; i++) {
+            int index = random.nextInt(chars.length());
+            password.append(chars.charAt(index));
+        }
+
+        return password.toString();
+    }
+
 }
