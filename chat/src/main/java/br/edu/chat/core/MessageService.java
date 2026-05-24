@@ -47,27 +47,56 @@ public class MessageService {
             return ServerResponse.error("Usuario '" + targetLogin + "' nao encontrado.");
         }
 
+        if (senderId == target.getId()) {
+            return ServerResponse.error("Voce nao pode enviar mensagem direta para si mesmo.");
+        }
+
         if (blockRepo.isBlockedBetween(senderId, target.getId())) {
-            return ServerResponse.error("Nao e possivel enviar mensagem para '" + targetLogin + "'.");
+            return ServerResponse.error(
+                    "Nao e possivel enviar mensagem para '" + targetLogin + "'. Existe bloqueio entre os usuarios.");
         }
 
         if (!permRepo.hasPermission(senderId, target.getId())) {
-            if (!permRepo.hasPendingRequest(senderId, target.getId())) {
-                PendingRequest req = new PendingRequest(
-                        RequestType.PERMISSION, senderId, target.getId(),
-                        null, RequestStatus.PENDING, LocalDateTime.now().toString());
-                int reqId = requestRepo.save(req);
-                permRepo.grant(senderId, target.getId());
-
-                User senderUser = userRepo.findById(senderId);
-                String senderLogin = senderUser != null ? senderUser.getLogin() : "desconhecido";
-                String notification = ServerResponse.privateRequest(reqId,
-                        senderLogin + " quer enviar mensagens diretas para voce. Use 'aceitar " + reqId + "' ou 'recusar " + reqId + "'.");
-                if (sender.isOnline(targetLogin)) {
-                    sender.sendToUser(targetLogin, notification);
-                }
+            if (requestRepo.existsPending(RequestType.PERMISSION, senderId, target.getId(), null)) {
+                return ServerResponse.info("Ja existe um pedido de permissao pendente para '" + targetLogin
+                        + "'. A mensagem ainda nao foi enviada.");
             }
-            return ServerResponse.info("Pedido de permissao enviado para '" + targetLogin + "'. Aguarde a resposta.");
+
+            String now = LocalDateTime.now().toString();
+            Message pendingMessage = new Message(senderId, target.getId(), null, content, MessageType.DIRECT, now);
+            int pendingMessageId = messageRepo.saveMessage(pendingMessage);
+
+            if (pendingMessageId < 0) {
+                return ServerResponse.error("Falha ao registrar mensagem pendente de aceite.");
+            }
+
+            PendingRequest req = new PendingRequest(
+                    RequestType.PERMISSION,
+                    senderId,
+                    target.getId(),
+                    null,
+                    pendingMessageId,
+                    RequestStatus.PENDING,
+                    now);
+
+            int reqId = requestRepo.save(req);
+            if (reqId < 0) {
+                return ServerResponse.error("Falha ao criar pedido de permissao.");
+            }
+
+            User senderUser = userRepo.findById(senderId);
+            String senderLogin = senderUser != null ? senderUser.getLogin() : "desconhecido";
+
+            String notification = ServerResponse.privateRequest(reqId,
+                    senderLogin + " quer enviar uma mensagem direta para voce. Use 'aceitar " + reqId
+                            + "' ou 'recusar " + reqId + "'.");
+
+            if (sender.isOnline(targetLogin)) {
+                sender.sendToUser(targetLogin, notification);
+            }
+
+            return ServerResponse.info("Pedido de permissao enviado para '" + targetLogin
+                    + "'. A mensagem sera enviada apos aceite.");
         }
 
         String now = LocalDateTime.now().toString();
@@ -82,11 +111,12 @@ public class MessageService {
             String senderLogin = senderUser != null ? senderUser.getLogin() : "desconhecido";
             sender.sendToUser(targetLogin, ServerResponse.directMessage(senderLogin, now, content));
             messageRepo.saveDelivery(msgId, target.getId(), true);
-        } else {
-            messageRepo.saveDelivery(msgId, target.getId(), false);
+            return ServerResponse
+                    .ok("Mensagem enviada para '" + targetLogin + "'. Recebeu agora: " + targetLogin + ".");
         }
 
-        return ServerResponse.ok("Mensagem enviada para '" + targetLogin + "'.");
+        messageRepo.saveDelivery(msgId, target.getId(), false);
+        return ServerResponse.ok("Mensagem salva para '" + targetLogin + "'. O usuario recebera quando ficar online.");
     }
 
     public String sendGroup(int senderId, String groupName, String content) {
@@ -110,20 +140,34 @@ public class MessageService {
         String senderLogin = senderUser != null ? senderUser.getLogin() : "desconhecido";
         String formatted = ServerResponse.groupMessage(groupName, senderLogin, now, content);
 
+        int deliveredNow = 0;
+        int deliveredLater = 0;
+        int blocked = 0;
+
         List<User> members = groupRepo.listMembers(group.getId());
         for (User member : members) {
             if (member.getId() == senderId) {
                 continue;
             }
+
+            if (blockRepo.isBlockedBetween(senderId, member.getId())) {
+                blocked++;
+                continue;
+            }
+
             if (sender.isOnline(member.getLogin())) {
                 sender.sendToUser(member.getLogin(), formatted);
                 messageRepo.saveDelivery(msgId, member.getId(), true);
+                deliveredNow++;
             } else {
                 messageRepo.saveDelivery(msgId, member.getId(), false);
+                deliveredLater++;
             }
         }
 
-        return ServerResponse.ok("Mensagem enviada para o grupo '" + groupName + "'.");
+        return ServerResponse.ok("Mensagem enviada para o grupo '" + groupName + "'. Receberam agora: "
+                + deliveredNow + ". Receberao depois: " + deliveredLater + ". Bloqueados/nao entregues: " + blocked
+                + ".");
     }
 
     public String sendGroupDirect(int senderId, String groupName, List<String> targetLogins, String content) {
@@ -141,35 +185,47 @@ public class MessageService {
         String senderLogin = senderUser != null ? senderUser.getLogin() : "desconhecido";
         String formatted = ServerResponse.groupDirectMessage(groupName, senderLogin, now, content);
 
-        int sent = 0;
+        int deliveredNow = 0;
+        int deliveredLater = 0;
+        int invalid = 0;
+        int blocked = 0;
+
         for (String targetLogin : targetLogins) {
             User target = userRepo.findByLogin(targetLogin);
-            if (target == null || !groupRepo.isMember(group.getId(), target.getId())) {
+            if (target == null || !groupRepo.isMember(group.getId(), target.getId()) || target.getId() == senderId) {
+                invalid++;
                 continue;
             }
+
             if (blockRepo.isBlockedBetween(senderId, target.getId())) {
+                blocked++;
                 continue;
             }
 
             Message msg = new Message(senderId, target.getId(), group.getId(), content, MessageType.GROUP_DIRECT, now);
             int msgId = messageRepo.saveMessage(msg);
             if (msgId < 0) {
+                invalid++;
                 continue;
             }
 
             if (sender.isOnline(targetLogin)) {
                 sender.sendToUser(targetLogin, formatted);
                 messageRepo.saveDelivery(msgId, target.getId(), true);
+                deliveredNow++;
             } else {
                 messageRepo.saveDelivery(msgId, target.getId(), false);
+                deliveredLater++;
             }
-            sent++;
         }
 
-        if (sent == 0) {
-            return ServerResponse.error("Nenhum destinatario valido encontrado no grupo.");
+        if (deliveredNow == 0 && deliveredLater == 0) {
+            return ServerResponse.error("Nenhum destinatario recebeu a mensagem privada no grupo. Invalidos: "
+                    + invalid + ". Bloqueados: " + blocked + ".");
         }
 
-        return ServerResponse.ok("Mensagem privada enviada no grupo '" + groupName + "'.");
+        return ServerResponse.ok("Mensagem privada enviada no grupo '" + groupName + "'. Receberam agora: "
+                + deliveredNow + ". Receberao depois: " + deliveredLater + ". Invalidos: " + invalid
+                + ". Bloqueados/nao entregues: " + blocked + ".");
     }
 }

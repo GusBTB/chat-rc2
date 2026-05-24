@@ -193,3 +193,620 @@ Testes realizados (todos passaram):
 
 Esta camada nao depende de socket nem de banco de dados.
 Ela apenas converte texto em objetos de comando, deixando o nucleo da aplicacao livre para tomar decisoes sobre cada comando recebido.
+
+ETAPA 5 - Criacao e correcao do nucleo de servicos
+
+Nesta etapa foi criada a camada de servicos do sistema, localizada no pacote:
+
+br.edu.chat.core
+
+A camada de servicos concentra as regras de negocio do chat. Ela fica entre o protocolo textual/servidor e a camada de repositorios. Dessa forma, o codigo de socket nao precisa conhecer diretamente os detalhes do banco de dados nem as regras completas de usuario, grupo, mensagens e bloqueios.
+
+Arquivos principais criados nesta etapa:
+
+1. UserService
+   Responsavel pelas regras de usuario:
+   - cadastro;
+   - login;
+   - logout;
+   - recuperacao de senha;
+   - listagem de usuarios;
+   - listagem de usuarios online;
+   - entrega de mensagens pendentes.
+
+2. MessageService
+   Responsavel pelas regras de mensagens:
+   - envio de mensagem direta;
+   - envio de mensagem para grupo;
+   - envio de mensagem privada dentro de grupo;
+   - salvamento de mensagens pendentes;
+   - verificacao de bloqueios;
+   - confirmacao de entrega ao remetente.
+
+3. GroupService
+   Responsavel pelas regras de grupo:
+   - criacao de grupo;
+   - convite de usuario para grupo;
+   - pedido de entrada em grupo;
+   - saida de grupo;
+   - convite para promover administrador;
+   - listagem de grupos;
+   - listagem de membros do grupo.
+
+4. BlockService
+   Responsavel pelas regras de bloqueio:
+   - bloquear usuario;
+   - desbloquear usuario;
+   - verificar se existe bloqueio entre dois usuarios.
+
+5. RequestService
+   Responsavel por processar pedidos pendentes:
+   - aceitar pedido de mensagem direta;
+   - recusar pedido de mensagem direta;
+   - aceitar convite para grupo;
+   - recusar convite para grupo;
+   - aceitar pedido de entrada em grupo;
+   - recusar pedido de entrada em grupo;
+   - aceitar convite para se tornar administrador;
+   - recusar convite para se tornar administrador.
+
+6. MessageSender
+   Interface criada para separar a regra de negocio do envio real de mensagens.
+   Nesta etapa, os servicos ainda nao dependem diretamente de socket.
+   O envio real sera conectado ao servidor TCP em uma etapa posterior.
+
+O que ja havia sido implementado:
+
+- Cadastro de usuario.
+- Login e logout.
+- Listagem de usuarios.
+- Listagem de usuarios online.
+- Criacao de grupos.
+- Convite para grupo.
+- Pedido de entrada em grupo.
+- Envio de mensagens diretas.
+- Envio de mensagens para grupo.
+- Envio de mensagens privadas dentro de grupo.
+- Bloqueio e desbloqueio de usuarios.
+- Pedidos pendentes com aceitar e recusar.
+- Estrutura inicial para mensagens offline.
+
+Correcoes realizadas nesta etapa:
+
+1. Correcao da permissao de mensagem direta
+   Antes, ao enviar a primeira mensagem direta, o sistema criava o pedido de permissao e tambem liberava a permissao automaticamente.
+   Isso estava incorreto, pois o destinatario deve aceitar antes da conversa direta ser liberada.
+   Agora, o sistema apenas cria o pedido pendente.
+   A permissao so e concedida quando o destinatario usa o comando aceitar.
+
+2. Correcao do controle de pedidos pendentes
+   Foi ajustado o uso de pending_requests para controlar pedidos ainda nao respondidos.
+   Isso evita criar permissoes antes da hora e tambem evita pedidos duplicados em alguns fluxos.
+
+3. Correcao do envio de mensagem em grupo
+   Agora as mensagens de grupo tambem respeitam bloqueios entre usuarios.
+   Se A bloqueou B ou B bloqueou A, mensagens de grupo de um nao sao entregues ao outro.
+
+4. Correcao do envio de mensagem privada dentro do grupo
+   O envio privado dentro do grupo verifica se o destinatario existe, se pertence ao grupo e se nao existe bloqueio entre remetente e destinatario.
+
+5. Correcao do pedido de entrada em grupo
+   Antes, o pedido de entrada era enviado apenas ao criador ou administrador principal do grupo.
+   Agora, o pedido e enviado para todos os membros atuais do grupo.
+   O usuario solicitante so entra no grupo quando todos os membros aceitarem.
+   Se qualquer membro recusar, a entrada e negada.
+
+6. Correcao da promocao de administrador
+   Antes, o usuario era promovido diretamente a administrador.
+   Agora, o administrador envia um convite de promocao.
+   O usuario convidado precisa aceitar para se tornar administrador.
+
+7. Correcao da saida de grupo
+   Agora, se o usuario for o unico administrador do grupo, ele nao pode sair antes de promover outro usuario a administrador.
+   Essa regra evita que um grupo fique sem administrador.
+
+8. Melhoria nas respostas de envio
+   As respostas do sistema passaram a informar melhor:
+   - quantos usuarios receberam a mensagem imediatamente;
+   - quantos receberao depois;
+   - quantos nao receberam por bloqueio ou por serem invalidos.
+
+Observacao sobre mensagens pendentes:
+
+O metodo UserService.deliverPendingMessages(User user) ja existe e sera usado para entregar mensagens pendentes quando o usuario ficar online.
+
+A chamada desse metodo deve ser feita na etapa do servidor TCP, depois que:
+1. o usuario fizer login com sucesso;
+2. o ClientHandler for associado ao usuario;
+3. o usuario for registrado no ClientSessionManager.
+
+Isso evita tentar entregar mensagens antes de o usuario ter uma conexao TCP ativa.
+
+Estado final da Etapa 5:
+
+A camada de servicos esta preparada para ser integrada ao servidor TCP.
+A regra de negocio principal esta separada da camada de socket.
+As proximas etapas devem criar o servidor TCP, o ClientHandler, o ClientSessionManager e o CommandProcessor para ligar os comandos digitados pelos clientes aos servicos criados nesta etapa.
+Complemento de validacao da Etapa 5
+
+Foram realizados testes manuais adicionais no ServiceTestMain para validar regras importantes do nucleo de servicos.
+
+Resultados validados:
+
+1. Promocao de administrador com aceite
+   Foi validado que um usuario nao se torna administrador imediatamente quando recebe o convite.
+   Primeiro, o convite de administracao fica pendente.
+   Somente depois que o usuario convidado aceita o pedido, ele passa a aparecer como administrador do grupo.
+
+2. Pedido de entrada em grupo com mais de um membro aprovador
+   Foi validado que, quando um usuario solicita entrada em um grupo que possui mais de um membro, todos os membros atuais recebem uma solicitacao.
+   O usuario solicitante nao entra no grupo apos apenas uma aprovacao.
+   Ele so entra depois que todos os membros aprovarem.
+
+3. Bloqueio em mensagem de grupo
+   Foi validado que o bloqueio tambem afeta mensagens enviadas dentro de grupos.
+   Quando Bruno bloqueou Alice e Alice enviou uma mensagem para o grupo, Bruno nao recebeu a mensagem, mas os demais membros nao bloqueados receberam.
+   A resposta do envio tambem indicou que houve usuario bloqueado/nao entregue.
+
+Pendencia encontrada:
+
+1. Mensagem offline no teste manual
+   O teste manual mostrou que, apos o logout de Bruno, o MessageService ainda considerou Bruno online e entregou a mensagem imediatamente.
+   Isso ocorreu porque o stubSender usado no ServiceTestMain nao estava sincronizado com o logout do UserService.
+   O UserService alterava o status do usuario no banco, mas o stubSender continuava respondendo que Bruno estava online.
+
+Correcao aplicada no teste manual:
+
+Foi ajustado o stubSender do ServiceTestMain para manter uma lista de usuarios online.
+Quando um usuario faz login, ele e adicionado a essa lista.
+Quando um usuario faz logout, ele e removido dessa lista.
+Assim, o teste manual consegue simular corretamente usuarios online e offline antes da integracao com sockets.
+
+Observacao para etapa futura:
+
+Na etapa do servidor TCP, esse controle de usuarios online nao devera depender do stubSender.
+Ele sera feito pelo ClientSessionManager, que mantera os usuarios atualmente conectados ao servidor.
+Ao fazer login, o usuario sera registrado no ClientSessionManager.
+Ao fazer logout ou desconectar, o usuario sera removido.
+Depois disso, a entrega de mensagens pendentes devera ser chamada com o usuario ja associado a uma conexao ativa.
+
+ETAPA 6 - Criacao do servidor TCP
+
+Nesta etapa foi criada a camada de servidor TCP do projeto.
+
+O objetivo desta etapa foi permitir que clientes externos se conectem ao sistema por meio de sockets TCP. A partir desta etapa, o sistema deixa de depender apenas de testes manuais e passa a ter uma estrutura real de servidor, capaz de aceitar conexoes e criar uma thread para cada cliente conectado.
+
+Arquivos criados:
+
+1. br.edu.chat.server.ChatServer
+   Classe responsavel por iniciar o ServerSocket na porta configurada.
+   A thread principal do servidor fica aguardando conexoes usando serverSocket.accept().
+   Quando um cliente se conecta, o servidor cria um ClientHandler e inicia uma nova Thread para atender esse cliente.
+
+2. br.edu.chat.server.ClientHandler
+   Classe que representa um cliente conectado ao servidor.
+   Cada ClientHandler roda em uma thread propria.
+   Suas responsabilidades sao:
+   - ler linhas enviadas pelo cliente;
+   - enviar essas linhas para o CommandProcessor;
+   - enviar as respostas de volta ao cliente;
+   - guardar qual usuario esta logado naquele socket;
+   - remover a sessao do usuario quando o cliente desconectar.
+
+3. br.edu.chat.server.ClientSessionManager
+   Classe responsavel por controlar os usuarios online no servidor.
+   Internamente utiliza ConcurrentHashMap para permitir acesso seguro por varias threads.
+   Tambem implementa a interface MessageSender.
+   Com isso, os servicos do nucleo conseguem enviar mensagens para usuarios online sem depender diretamente de sockets.
+
+4. br.edu.chat.core.CommandProcessor
+   Classe responsavel por conectar o protocolo textual com os servicos do nucleo.
+   Ela recebe uma linha digitada pelo cliente, usa o CommandParser para interpretar o comando e chama o service adequado.
+   Exemplos:
+   - cadastro chama UserService.register;
+   - login chama UserService.login;
+   - @usuario: mensagem chama MessageService.sendDirect;
+   - &grupo: mensagem chama MessageService.sendGroup;
+   - novogrupo chama GroupService.createGroup;
+   - aceitar id chama RequestService.accept;
+   - bloquear chama BlockService.block.
+
+5. br.edu.chat.MainServer
+   Classe principal para iniciar o servidor TCP.
+   Por padrao, usa a porta 6789.
+   Tambem permite informar a porta por argumento.
+
+Alteracao realizada:
+
+O arquivo App.java foi ajustado para chamar MainServer.main(args), facilitando a execucao do servidor diretamente pela IDE.
+
+Funcionamento do servidor:
+
+1. O servidor inicializa o banco de dados.
+2. O servidor abre um ServerSocket na porta definida.
+3. A thread principal fica bloqueada em accept(), aguardando clientes.
+4. Quando um cliente conecta, o servidor cria um ClientHandler.
+5. Cada ClientHandler roda em uma thread separada.
+6. O ClientHandler le comandos enviados pelo cliente.
+7. O CommandProcessor interpreta e executa os comandos.
+8. As respostas sao enviadas de volta ao cliente pelo socket.
+
+Controle de usuarios online:
+
+Nesta etapa, o controle de usuarios online passou a ser feito pelo ClientSessionManager.
+Quando um usuario faz login com sucesso:
+- o ClientHandler guarda o id e o login do usuario;
+- o ClientSessionManager registra o usuario como online;
+- as mensagens pendentes sao entregues apos o registro da sessao.
+
+Quando um usuario faz logout ou desconecta:
+- o usuario e removido do ClientSessionManager;
+- o status no banco e atualizado para OFFLINE;
+- o ClientHandler limpa os dados do usuario logado.
+
+Status de usuario:
+
+Quando o usuario altera o status para ONLINE, ele volta a ser registrado no ClientSessionManager e pode receber mensagens em tempo real.
+Quando altera para OFFLINE, OCUPADO ou AUSENTE, ele continua conectado ao socket, mas sai da lista de usuarios disponiveis para entrega imediata.
+
+Observacao:
+
+Nesta etapa ainda nao foi criado o cliente Java de console.
+Os testes podem ser feitos temporariamente usando telnet ou outro cliente TCP simples.
+O cliente Java proprio sera criado na proxima etapa.
+
+Testes previstos:
+
+- iniciar servidor;
+- conectar um cliente via telnet;
+- verificar mensagem de boas-vindas;
+- executar comando ajuda;
+- cadastrar usuario via socket;
+- fazer login via socket;
+- conectar dois clientes ao mesmo tempo;
+- enviar comandos sem derrubar o servidor;
+- fechar um cliente e verificar que o servidor continua rodando;
+- confirmar que usuario logado fica OFFLINE ao desconectar.
+
+Complemento de validacao e ajustes da Etapa 6
+
+Durante os primeiros testes manuais do servidor TCP, foram encontrados alguns pontos de ajuste.
+
+1. Ajuste de quebras de linha nas respostas do servidor
+
+Foi observado que respostas com varias linhas, como ajuda e listausuarios, apareciam desalinhadas em alguns clientes TCP.
+Isso acontecia porque a resposta era enviada como uma unica string contendo quebras de linha internas.
+
+Correcao aplicada:
+O metodo send do ClientHandler foi ajustado para dividir mensagens com multiplas linhas e enviar cada linha separadamente pelo PrintWriter.
+Com isso, respostas como ajuda, listausuarios, listagrupos e listargrupo passaram a aparecer com um item embaixo do outro.
+
+2. Tratamento de caracteres de controle e backspace
+
+Durante testes manuais, alguns comandos digitados com erro e corrigidos com Backspace eram interpretados como comandos desconhecidos.
+Isso ocorre porque alguns clientes TCP enviam caracteres de controle, como Backspace ou DEL, dentro da linha recebida pelo servidor.
+
+Correcao aplicada:
+Foi criado um tratamento no ClientHandler para limpar a linha recebida antes de enviar ao CommandProcessor.
+Esse tratamento remove caracteres de controle e aplica o efeito de Backspace sobre a string final.
+
+3. Sugestao para comandos desconhecidos
+
+Foi adicionada uma melhoria no CommandProcessor para sugerir comandos parecidos quando o usuario digita um comando desconhecido.
+Exemplo:
+Se o usuario digitar aceitr 1, o servidor pode sugerir aceitar.
+
+Essa melhoria apenas sugere o comando.
+O servidor nao executa automaticamente comandos corrigidos, pois comandos como aceitar e recusar alteram o estado do sistema e precisam ser confirmados explicitamente pelo usuario.
+
+Pendencia futura identificada:
+
+1. Primeira mensagem direta apos aceite
+
+Durante o teste de mensagem direta, foi observado que, quando Alice envia uma primeira mensagem para Bruno sem permissao previa, o sistema cria corretamente o pedido de permissao.
+Porem, apos Bruno aceitar, a mensagem original nao e entregue automaticamente.
+Alice precisa enviar a mensagem novamente.
+
+Esse comportamento esta coerente com a implementacao atual, porque o pedido de permissao nao armazena o conteudo da primeira mensagem.
+Entretanto, pelo enunciado do trabalho, pode ser necessario que a primeira mensagem seja entregue apos o aceite.
+
+Correcao futura recomendada para a etapa 10:
+Ajustar a modelagem dos pedidos de mensagem direta para armazenar a primeira mensagem enquanto o pedido estiver pendente.
+Uma alternativa e associar um message_id ao pedido pendente ou criar uma estrutura especifica para guardar a mensagem inicial ate o aceite do destinatario.
+
+ETAPA 7 - Criacao do cliente TCP
+
+Nesta etapa foi criada a camada de cliente TCP do projeto.
+
+O objetivo desta etapa foi permitir que o usuario interaja com o servidor usando um cliente Java de console, sem depender de telnet ou de outros programas externos.
+
+Arquivos criados:
+
+1. br.edu.chat.client.ChatClient
+   Classe responsavel por abrir a conexao TCP com o servidor.
+   Ela cria um Socket apontando para o host e a porta configurados.
+   Depois de conectar, cria duas threads:
+   - uma thread para enviar comandos digitados no teclado;
+   - uma thread para receber mensagens enviadas pelo servidor.
+
+2. br.edu.chat.client.ConsoleInputThread
+   Thread responsavel por ler o teclado do usuario usando BufferedReader sobre System.in.
+   Cada linha digitada e enviada ao servidor pelo socket.
+   O comando saircliente encerra apenas o cliente local, fechando o socket.
+
+3. br.edu.chat.client.ServerListenerThread
+   Thread responsavel por escutar mensagens vindas do servidor.
+   Ela fica lendo o InputStream do socket e imprime cada linha recebida no console.
+   Isso permite que o cliente receba mensagens mesmo sem estar digitando ou pressionando Enter.
+
+4. br.edu.chat.MainClient
+   Classe principal para iniciar o cliente TCP.
+   Por padrao, conecta em localhost na porta 6789.
+   Tambem permite informar host e porta por argumentos.
+
+Funcionamento do cliente:
+
+1. O usuario inicia o servidor.
+2. O usuario inicia um ou mais clientes.
+3. Cada cliente abre uma conexao TCP com o servidor.
+4. O cliente cria duas threads:
+   - ConsoleInputThread para envio;
+   - ServerListenerThread para recebimento.
+5. O usuario digita comandos no console.
+6. Os comandos sao enviados ao servidor.
+7. As respostas e mensagens recebidas sao impressas no console.
+
+Testes previstos:
+
+- iniciar o servidor;
+- iniciar um cliente;
+- verificar mensagem de boas-vindas;
+- enviar comando ajuda;
+- cadastrar usuario;
+- fazer login;
+- iniciar dois clientes ao mesmo tempo;
+- enviar mensagem de um cliente para outro;
+- receber mensagens sem precisar pressionar Enter;
+- encerrar um cliente com saircliente;
+- verificar que o servidor continua rodando.
+
+Limitacao conhecida:
+
+Em console Java puro, usando System.in, nao ha controle completo da linha que o usuario esta digitando.
+Quando uma mensagem chega enquanto o usuario digita, o cliente imprime a mensagem recebida e reimprime o prompt >.
+Isso permite continuar a interacao, mas nao preserva perfeitamente o texto que estava sendo digitado.
+Uma implementacao mais fiel desse requisito poderia usar uma biblioteca como JLine, que permite controlar a linha atual do terminal.
+
+ETAPA 8 - Integracao de cadastro, login, logout, status e recuperacao de senha
+
+Nesta etapa foram validadas e ajustadas as primeiras funcionalidades reais integradas entre cliente e servidor.
+
+Funcionalidades validadas:
+
+1. Cadastro de usuario
+   O comando cadastro;Nome Completo;login;email;senha e interpretado pelo CommandParser e processado pelo CommandProcessor.
+   O cadastro e encaminhado para UserService.register, que valida os campos, verifica login e email duplicados e chama UserRepository.create.
+   A senha e salva no banco usando hash, por meio de PasswordUtils.
+
+2. Login
+   O comando login;login;senha e interpretado pelo CommandParser e processado pelo CommandProcessor.
+   O UserService busca o usuario pelo login e valida a senha usando PasswordUtils.verify.
+   Quando o login e valido, o status do usuario e alterado para ONLINE, o ClientHandler guarda o usuario logado e o ClientSessionManager registra o usuario como online.
+   Depois disso, as mensagens pendentes sao entregues.
+
+3. Logout
+   O comando logout remove o usuario do ClientSessionManager, atualiza o status no banco para OFFLINE e limpa os dados de usuario logado no ClientHandler.
+   Depois do logout, comandos protegidos voltam a exigir login.
+
+4. Mudanca de status
+   O comando status;ONLINE altera o status no banco para ONLINE, registra o usuario no ClientSessionManager e entrega mensagens pendentes.
+   Os comandos status;OFFLINE, status;OCUPADO e status;AUSENTE atualizam o status no banco e removem o usuario do ClientSessionManager.
+   Assim, o usuario pode continuar conectado ao socket, mas nao recebe mensagens imediatas enquanto nao estiver ONLINE.
+
+5. Recuperacao de senha
+   Como as senhas sao salvas com hash, nao e possivel exibir a senha original do usuario.
+   Por isso, o comando recuperarsenha;email foi ajustado para gerar uma senha temporaria.
+   A nova senha temporaria e mostrada ao usuario, o hash dela e salvo no banco e a senha antiga deixa de funcionar.
+
+Correcoes realizadas nesta etapa:
+
+1. Foi adicionada verificacao para impedir login simultaneo do mesmo usuario em dois clientes diferentes.
+   Caso o usuario ja esteja conectado, o servidor retorna erro informando que ele ja esta logado em outro cliente.
+
+2. Foi ajustada a recuperacao de senha para realmente alterar a senha do usuario.
+   Antes, o sistema apenas retornava uma mensagem dizendo que a senha havia sido enviada.
+   Agora, uma senha temporaria e gerada e gravada no banco.
+
+3. Opcionalmente, foi adicionada validacao amigavel para nome completo duplicado, pois a tabela users possui restricao UNIQUE em full_name.
+
+Testes previstos:
+
+- cadastrar usuario novo;
+- tentar cadastrar login repetido;
+- tentar cadastrar email repetido;
+- fazer login com senha correta;
+- recusar login com senha incorreta;
+- impedir login simultaneo do mesmo usuario;
+- mudar status para OCUPADO;
+- confirmar que usuario OCUPADO nao aparece como online;
+- mudar status para ONLINE;
+- confirmar que usuario volta a aparecer como online;
+- fazer logout;
+- confirmar que comandos protegidos exigem login apos logout;
+- recuperar senha com email valido;
+- confirmar que senha antiga nao funciona apos recuperacao;
+- confirmar que senha temporaria funciona;
+- negar recuperacao para email inexistente.
+
+ETAPA 9 - Listagem de usuarios e grupos
+
+Nesta etapa foram validadas as funcionalidades de listagem do sistema.
+
+Comandos validados:
+
+1. listausuarios
+   Lista apenas os usuarios online.
+   O comando e interpretado pelo CommandParser como LISTA_USUARIOS.
+   O CommandProcessor encaminha para UserService.listOnlineUsers.
+   O UserService consulta o UserRepository.listOnline, que retorna apenas usuarios com status ONLINE.
+
+2. listagrupos
+   Lista os grupos cadastrados no sistema.
+   O comando e interpretado pelo CommandParser como LISTA_GRUPOS.
+   O CommandProcessor encaminha para GroupService.listGroups.
+   O GroupService consulta o GroupRepository.listGroups e monta a resposta para o cliente.
+
+3. listargrupo &nomegrupo
+   Lista os membros de um grupo especifico.
+   O comando e interpretado pelo CommandParser como LISTAR_GRUPO.
+   O CommandProcessor encaminha para GroupService.listGroupMembers.
+   O GroupService verifica se o grupo existe e lista seus membros.
+   Administradores aparecem com a marcacao [admin].
+
+Resultado da validacao:
+
+- Com apenas um usuario online, listausuarios mostra somente esse usuario.
+- Com dois usuarios online, ambos aparecem em listausuarios.
+- Usuarios com status OFFLINE, OCUPADO ou AUSENTE nao aparecem em listausuarios.
+- Grupos criados aparecem em listagrupos.
+- listargrupo &nomegrupo mostra os membros do grupo.
+- listargrupo &grupo_inexistente retorna erro amigavel.
+- listargrupo sem o simbolo & retorna erro de formato.
+
+Observacao:
+
+A implementacao atual permite que qualquer usuario logado liste os grupos e membros dos grupos.
+Isso esta de acordo com a fase atual do projeto, pois o enunciado informa que o usuario, ao entrar no chat, pode listar os grupos existentes e os usuarios online.
+
+Melhoria opcional:
+
+A listagem de membros do grupo pode ser expandida para exibir tambem o status de cada membro, por exemplo:
+- alice [admin] [online]
+- bruno [offline]
+
+Essa melhoria e apenas visual e nao altera a regra principal da etapa.
+
+ETAPA 10 - Mensagem direta com aceite previo
+
+Nesta etapa foi validado e corrigido o fluxo de mensagens diretas entre usuarios.
+
+Comando principal:
+
+@usuario: mensagem
+
+Fluxo implementado:
+
+1. Primeiro envio sem permissao previa
+   Quando um usuario envia uma mensagem direta para outro usuario pela primeira vez, o sistema verifica:
+   - se o remetente esta logado;
+   - se o destinatario existe;
+   - se nao existe bloqueio entre eles;
+   - se ja existe permissao de conversa direta.
+
+   Se nao existir permissao, o sistema:
+   - salva a mensagem inicial na tabela messages;
+   - cria um pedido pendente na tabela pending_requests;
+   - associa o pedido pendente a mensagem inicial por meio da coluna pending_message_id;
+   - envia o pedido de aceite ao destinatario, se ele estiver online;
+   - responde ao remetente que a mensagem sera enviada apos aceite.
+
+2. Aceite do pedido
+   Quando o destinatario digita aceitar id, o sistema:
+   - marca o pedido como aceito;
+   - grava a permissao de conversa direta em direct_permissions;
+   - notifica o remetente;
+   - busca a mensagem inicial associada ao pedido;
+   - entrega a mensagem inicial imediatamente se o destinatario estiver online;
+   - ou salva a entrega como pendente se o destinatario nao estiver online.
+
+3. Recusa do pedido
+   Quando o destinatario digita recusar id, o sistema:
+   - marca o pedido como recusado;
+   - nao entrega a mensagem inicial;
+   - notifica o remetente que o pedido foi recusado e que a mensagem inicial nao foi entregue.
+
+4. Envios seguintes
+   Depois que a permissao direta existe, novas mensagens de A para B sao enviadas sem novo pedido de aceite.
+   Se o destinatario estiver online, a mensagem e entregue imediatamente.
+   Se o destinatario estiver offline, ocupado ou ausente, a mensagem e salva como pendente e sera entregue quando ele voltar a ficar online.
+
+Alteracoes realizadas:
+
+1. Foi adicionada a coluna pending_message_id na tabela pending_requests.
+   Essa coluna aponta para a primeira mensagem enviada antes do aceite.
+
+2. A classe PendingRequest foi atualizada para armazenar pendingMessageId.
+
+3. O RequestRepository foi atualizado para salvar e consultar pending_message_id.
+
+4. O MessageRepository recebeu o metodo findById, usado para buscar a mensagem inicial quando o pedido e aceito.
+
+5. O MessageService.sendDirect foi ajustado:
+   - antes, a primeira mensagem sem permissao apenas criava o pedido de aceite;
+   - agora, a primeira mensagem e salva e associada ao pedido pendente.
+
+6. O RequestService.accept foi ajustado:
+   - ao aceitar um pedido de mensagem direta, a permissao e concedida;
+   - a primeira mensagem e entregue imediatamente ou salva como pendente.
+
+7. O RequestService.refuse foi ajustado:
+   - ao recusar um pedido de mensagem direta, o remetente e avisado que a mensagem inicial nao foi entregue.
+
+Testes previstos:
+
+- A envia mensagem direta para B pela primeira vez;
+- B recebe pedido de aceite;
+- a mensagem inicial nao aparece para B antes do aceite;
+- B recusa e A e avisado da recusa;
+- A tenta novamente e novo pedido e criado;
+- B aceita;
+- a mensagem inicial e entregue apos o aceite;
+- A envia nova mensagem depois do aceite;
+- B recebe a nova mensagem sem novo pedido;
+- B fica offline;
+- A envia mensagem para B;
+- a mensagem fica pendente;
+- B faz login;
+- B recebe a mensagem pendente.
+
+CORRECAO - Consistencia de logout, desconexao e usuarios online
+
+Durante os testes com login, logout, Ctrl+C e saircliente, foi identificado que um usuario poderia continuar aparecendo em listausuarios mesmo depois de o cliente ter sido encerrado.
+
+Causa identificada:
+
+O comando listausuarios consulta os usuarios com status ONLINE no banco de dados.
+Em alguns cenarios de encerramento abrupto, como Ctrl+C, fechamento do cliente ou queda de conexao, o banco poderia continuar com o usuario marcado como ONLINE se a limpeza da sessao nao fosse concluida corretamente.
+
+Correcoes aplicadas:
+
+1. ClientSessionManager
+   Foi criada a remocao segura por handler.
+   O metodo removeIfSameHandler remove o usuario da sessao somente se a sessao atual ainda pertencer ao mesmo ClientHandler.
+   Isso evita que uma conexao antiga remova por engano uma sessao mais nova do mesmo usuario.
+
+2. ClientHandler
+   O metodo disconnect passou a ser idempotente, garantindo que a limpeza da sessao rode apenas uma vez.
+   Quando o socket fecha ou ocorre erro de envio, o ClientHandler chama a rotina de desconexao.
+   Essa rotina remove o usuario do ClientSessionManager, atualiza o status no banco para OFFLINE e limpa os dados do usuario logado.
+
+3. ConsoleInputThread
+   O comando saircliente passou a enviar logout ao servidor antes de fechar o socket.
+   Assim, o encerramento voluntario do cliente tambem atualiza o usuario para OFFLINE.
+
+4. ChatClient
+   Foi adicionado um shutdown hook para fechar o socket em caso de Ctrl+C ou encerramento do processo do cliente.
+   Isso aumenta a chance de o servidor detectar a desconexao e marcar o usuario como OFFLINE.
+
+5. ChatServer
+   Ao iniciar o servidor, todos os usuarios sao marcados como OFFLINE.
+   Isso evita que usuarios fiquem presos como ONLINE apos queda ou reinicio abrupto do servidor.
+
+Testes recomendados:
+
+- Fazer login e depois logout; o usuario nao deve aparecer em listausuarios.
+- Fazer login e depois saircliente; o usuario nao deve aparecer em listausuarios.
+- Fazer login e fechar o cliente com Ctrl+C; o usuario nao deve aparecer em listausuarios apos a desconexao ser detectada.
+- Reiniciar o servidor; usuarios de sessoes antigas nao devem aparecer como online.
+- Alterar status para OCUPADO, AUSENTE ou OFFLINE; o usuario nao deve aparecer em listausuarios.
+- Alterar status para ONLINE; o usuario deve voltar a aparecer em listausuarios.

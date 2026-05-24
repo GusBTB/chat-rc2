@@ -10,6 +10,8 @@ import br.edu.chat.repository.DirectPermissionRepository;
 import br.edu.chat.repository.GroupRepository;
 import br.edu.chat.repository.RequestRepository;
 import br.edu.chat.repository.UserRepository;
+import br.edu.chat.model.Message;
+import br.edu.chat.repository.MessageRepository;
 
 public class RequestService {
 
@@ -17,15 +19,17 @@ public class RequestService {
     private final UserRepository userRepo;
     private final GroupRepository groupRepo;
     private final DirectPermissionRepository permRepo;
+    private final MessageRepository messageRepo;
     private final MessageSender sender;
 
     public RequestService(RequestRepository requestRepo, UserRepository userRepo,
             GroupRepository groupRepo, DirectPermissionRepository permRepo,
-            MessageSender sender) {
+            MessageRepository messageRepo, MessageSender sender) {
         this.requestRepo = requestRepo;
         this.userRepo = userRepo;
         this.groupRepo = groupRepo;
         this.permRepo = permRepo;
+        this.messageRepo = messageRepo;
         this.sender = sender;
     }
 
@@ -52,6 +56,8 @@ public class RequestService {
             return acceptInvite(req);
         } else if (req.getRequestType() == RequestType.GROUP_JOIN) {
             return acceptGroupJoin(req);
+        } else if (req.getRequestType() == RequestType.ADMIN_PROMOTION) {
+            return acceptAdminPromotion(req);
         }
 
         return ServerResponse.error("Tipo de pedido desconhecido.");
@@ -74,12 +80,25 @@ public class RequestService {
 
         requestRepo.updateStatus(requestId, RequestStatus.REFUSED);
 
+        if (req.getRequestType() == RequestType.GROUP_JOIN && req.getGroupId() != null) {
+            requestRepo.refusePendingGroupJoinApprovals(req.getRequesterUserId(), req.getGroupId());
+        }
+
         User requester = userRepo.findById(req.getRequesterUserId());
         String requesterLogin = requester != null ? requester.getLogin() : "desconhecido";
 
         if (sender.isOnline(requesterLogin)) {
-            sender.sendToUser(requesterLogin,
-                    ServerResponse.system("Seu pedido #" + requestId + " foi recusado."));
+            if (req.getRequestType() == RequestType.PERMISSION) {
+                User target = userRepo.findById(req.getTargetUserId());
+                String targetLogin = target != null ? target.getLogin() : "desconhecido";
+
+                sender.sendToUser(requesterLogin,
+                        ServerResponse.system(targetLogin
+                                + " recusou seu pedido de mensagem direta. A mensagem inicial nao foi entregue."));
+            } else {
+                sender.sendToUser(requesterLogin,
+                        ServerResponse.system("Seu pedido #" + requestId + " foi recusado."));
+            }
         }
 
         return ServerResponse.ok("Pedido #" + requestId + " recusado.");
@@ -89,16 +108,59 @@ public class RequestService {
         permRepo.grant(req.getRequesterUserId(), req.getTargetUserId());
 
         User requester = userRepo.findById(req.getRequesterUserId());
+        User target = userRepo.findById(req.getTargetUserId());
+
         String requesterLogin = requester != null ? requester.getLogin() : "desconhecido";
+        String targetLogin = target != null ? target.getLogin() : "desconhecido";
 
         if (sender.isOnline(requesterLogin)) {
-            User target = userRepo.findById(req.getTargetUserId());
-            String targetLogin = target != null ? target.getLogin() : "desconhecido";
             sender.sendToUser(requesterLogin,
                     ServerResponse.system(targetLogin + " aceitou seu pedido de mensagem direta."));
         }
 
-        return ServerResponse.ok("Pedido aceito. " + requesterLogin + " agora pode te enviar mensagens diretas.");
+        if (req.getPendingMessageId() == null) {
+            return ServerResponse.ok("Pedido aceito. " + requesterLogin + " agora pode te enviar mensagens diretas.");
+        }
+
+        Message pendingMessage = messageRepo.findById(req.getPendingMessageId());
+
+        if (pendingMessage == null) {
+            return ServerResponse.ok("Pedido aceito, mas a mensagem inicial nao foi encontrada.");
+        }
+
+        if (target == null) {
+            return ServerResponse
+                    .ok("Pedido aceito, mas o destinatario nao foi encontrado para entrega da mensagem inicial.");
+        }
+
+        if (requester == null) {
+            return ServerResponse
+                    .ok("Pedido aceito, mas o remetente nao foi encontrado para entrega da mensagem inicial.");
+        }
+
+        if (sender.isOnline(targetLogin)) {
+            sender.sendToUser(targetLogin,
+                    ServerResponse.directMessage(requesterLogin, pendingMessage.getCreatedAt(),
+                            pendingMessage.getContent()));
+            messageRepo.saveDelivery(pendingMessage.getId(), target.getId(), true);
+
+            if (sender.isOnline(requesterLogin)) {
+                sender.sendToUser(requesterLogin,
+                        ServerResponse.system("Mensagem inicial entregue para " + targetLogin + "."));
+            }
+
+            return ServerResponse.ok("Pedido aceito. Mensagem inicial entregue.");
+        }
+
+        messageRepo.saveDelivery(pendingMessage.getId(), target.getId(), false);
+
+        if (sender.isOnline(requesterLogin)) {
+            sender.sendToUser(requesterLogin,
+                    ServerResponse.system("Mensagem inicial salva para " + targetLogin
+                            + ". O usuario recebera quando ficar online."));
+        }
+
+        return ServerResponse.ok("Pedido aceito. Mensagem inicial salva para entrega posterior.");
     }
 
     private String acceptInvite(PendingRequest req) {
@@ -111,7 +173,9 @@ public class RequestService {
             return ServerResponse.error("Grupo do convite nao encontrado.");
         }
 
-        groupRepo.addMember(group.getId(), req.getTargetUserId(), false);
+        if (!groupRepo.isMember(group.getId(), req.getTargetUserId())) {
+            groupRepo.addMember(group.getId(), req.getTargetUserId(), false);
+        }
 
         User requester = userRepo.findById(req.getRequesterUserId());
         String requesterLogin = requester != null ? requester.getLogin() : "desconhecido";
@@ -136,16 +200,56 @@ public class RequestService {
             return ServerResponse.error("Grupo do pedido nao encontrado.");
         }
 
-        groupRepo.addMember(group.getId(), req.getRequesterUserId(), false);
-
         User requester = userRepo.findById(req.getRequesterUserId());
         String requesterLogin = requester != null ? requester.getLogin() : "desconhecido";
 
-        if (sender.isOnline(requesterLogin)) {
-            sender.sendToUser(requesterLogin,
-                    ServerResponse.system("Seu pedido para entrar no grupo '" + group.getName() + "' foi aceito."));
+        int pendingApprovals = requestRepo.countPendingGroupJoinApprovals(req.getRequesterUserId(), group.getId());
+        if (pendingApprovals > 0) {
+            return ServerResponse.ok("Pedido aceito. Ainda faltam " + pendingApprovals
+                    + " aprovacao(oes) para " + requesterLogin + " entrar no grupo '" + group.getName() + "'.");
         }
 
-        return ServerResponse.ok("Pedido aceito. " + requesterLogin + " agora e membro do grupo '" + group.getName() + "'.");
+        if (!groupRepo.isMember(group.getId(), req.getRequesterUserId())) {
+            groupRepo.addMember(group.getId(), req.getRequesterUserId(), false);
+        }
+
+        if (sender.isOnline(requesterLogin)) {
+            sender.sendToUser(requesterLogin,
+                    ServerResponse
+                            .system("Seu pedido para entrar no grupo '" + group.getName() + "' foi aceito por todos."));
+        }
+
+        return ServerResponse
+                .ok("Todos aceitaram. " + requesterLogin + " agora e membro do grupo '" + group.getName() + "'.");
+    }
+
+    private String acceptAdminPromotion(PendingRequest req) {
+        if (req.getGroupId() == null) {
+            return ServerResponse.error("Dados do convite de administracao invalidos.");
+        }
+
+        Group group = groupRepo.findById(req.getGroupId());
+        if (group == null) {
+            return ServerResponse.error("Grupo do convite de administracao nao encontrado.");
+        }
+
+        if (!groupRepo.isMember(group.getId(), req.getTargetUserId())) {
+            return ServerResponse.error("Voce nao e membro do grupo '" + group.getName() + "'.");
+        }
+
+        groupRepo.makeAdmin(group.getId(), req.getTargetUserId());
+
+        User requester = userRepo.findById(req.getRequesterUserId());
+        String requesterLogin = requester != null ? requester.getLogin() : "desconhecido";
+        User target = userRepo.findById(req.getTargetUserId());
+        String targetLogin = target != null ? target.getLogin() : "desconhecido";
+
+        if (sender.isOnline(requesterLogin)) {
+            sender.sendToUser(requesterLogin,
+                    ServerResponse
+                            .system(targetLogin + " aceitou ser administrador do grupo '" + group.getName() + "'."));
+        }
+
+        return ServerResponse.ok("Voce agora e administrador do grupo '" + group.getName() + "'.");
     }
 }

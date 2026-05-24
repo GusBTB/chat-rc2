@@ -71,6 +71,49 @@ public class MessageRepository {
         return -1;
     }
 
+    public Message findById(int messageId) {
+        String sql = """
+                SELECT
+                    id,
+                    sender_user_id,
+                    receiver_user_id,
+                    group_id,
+                    content,
+                    message_type,
+                    created_at
+                FROM messages
+                WHERE id = ?;
+                """;
+
+        try (Connection connection = DatabaseConnection.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setInt(1, messageId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    Integer receiverUserId = getNullableInt(resultSet, "receiver_user_id");
+                    Integer groupId = getNullableInt(resultSet, "group_id");
+
+                    return new Message(
+                            resultSet.getInt("id"),
+                            resultSet.getInt("sender_user_id"),
+                            receiverUserId,
+                            groupId,
+                            resultSet.getString("content"),
+                            MessageType.valueOf(resultSet.getString("message_type")),
+                            resultSet.getString("created_at"));
+                }
+            }
+
+        } catch (SQLException e) {
+            System.out.println("[ERRO] Falha ao buscar mensagem por id.");
+            System.out.println("Detalhes: " + e.getMessage());
+        }
+
+        return null;
+    }
+
     public int saveDelivery(int messageId, int receiverUserId, boolean delivered) {
         String sql = """
                 INSERT INTO message_deliveries (
@@ -164,6 +207,11 @@ public class MessageRepository {
         }
 
         return deliveries;
+    }
+
+    private Integer getNullableInt(ResultSet resultSet, String columnName) throws SQLException {
+        int value = resultSet.getInt(columnName);
+        return resultSet.wasNull() ? null : value;
     }
 
     public boolean markDelivered(int deliveryId) {
