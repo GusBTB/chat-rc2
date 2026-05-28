@@ -810,3 +810,219 @@ Testes recomendados:
 - Reiniciar o servidor; usuarios de sessoes antigas nao devem aparecer como online.
 - Alterar status para OCUPADO, AUSENTE ou OFFLINE; o usuario nao deve aparecer em listausuarios.
 - Alterar status para ONLINE; o usuario deve voltar a aparecer em listausuarios.
+
+ETAPA 11 - Criacao de grupo
+
+Nesta etapa foi validado e ajustado o fluxo de criacao de grupos no chat.
+
+Comando:
+
+novogrupo nomegrupo
+
+Fluxo implementado:
+
+1. O comando novogrupo e interpretado pelo CommandParser como NOVO_GRUPO. O parser valida o nome do grupo, aceitando apenas letras, numeros e _.
+2. O CommandProcessor verifica se o usuario esta logado e, em seguida, se o status atual permite executar acoes.
+3. A chamada e encaminhada para GroupService.createGroup, que executa as seguintes verificacoes:
+   - nome do grupo nao pode ser vazio;
+   - o grupo ainda nao pode existir (consulta GroupRepository.findByName).
+4. Caso as verificacoes passem, GroupRepository.createGroup grava o grupo na tabela groups_chat com o id do criador.
+5. O criador e adicionado em group_members com is_admin = 1, tornando-se administrador automatico.
+6. O servidor responde com uma mensagem de OK informando que o grupo foi criado e que o usuario e administrador.
+
+Pontos validados:
+
+- Usuario logado consegue criar grupo.
+- O grupo aparece em listagrupos apos a criacao.
+- O criador aparece em listargrupo &nomegrupo com a marcacao [admin].
+- Nao e possivel criar dois grupos com o mesmo nome.
+- Nao e possivel criar grupo sem estar logado, pois o CommandProcessor barra o comando antes.
+- Nomes de grupo invalidos sao rejeitados ainda no parser.
+
+
+ETAPA 12 - Adicionar usuario ao grupo
+
+Nesta etapa foi validado e ajustado o fluxo de convite de novos membros para um grupo existente.
+
+Comandos:
+
+inserir &nomegrupo@usuario
+inserir &nomegrupo@usuario1,@usuario2
+
+Fluxo implementado:
+
+1. O CommandParser interpreta o comando como INSERIR_GRUPO, extraindo o nome do grupo e a lista de usuarios convidados. Multiplos usuarios podem ser passados separados por virgula.
+2. O CommandProcessor verifica se o usuario esta logado e, em seguida, repassa cada convidado para GroupService.insertMember.
+3. GroupService.insertMember executa, para cada usuario convidado:
+   - verifica se o grupo existe;
+   - verifica se o remetente do convite e administrador do grupo;
+   - verifica se o convidado existe na tabela users;
+   - verifica se o convidado ja e membro do grupo;
+   - verifica se ja existe um convite pendente do mesmo administrador para o mesmo convidado, evitando convites duplicados.
+4. Caso o convite seja valido, e criado um registro em pending_requests com request_type = INVITE e status = PENDING.
+5. Se o convidado estiver online, o servidor envia imediatamente uma mensagem no formato:
+   [CONVITE id] usuario te convidou para o grupo 'nomegrupo'. Use 'aceitar id' ou 'recusar id'.
+   Caso esteja offline, o convite fica salvo em pending_requests e e reenviado quando o usuario voltar a ficar online.
+
+Aceite e recusa:
+
+- O comando aceitar id e tratado por RequestService.accept. Para um convite, o sistema:
+  - marca o pedido como ACCEPTED;
+  - adiciona o usuario na tabela group_members;
+  - avisa o remetente do convite, se ele estiver online;
+  - avisa os demais membros do grupo com a mensagem "usuario entrou no grupo 'nomegrupo'.".
+- O comando recusar id marca o pedido como REFUSED e avisa o remetente do convite que o pedido foi recusado.
+
+Ajustes realizados nesta etapa:
+
+1. Notificacao do grupo ao aceitar convite
+   O metodo acceptInvite no RequestService passou a chamar notifyGroupMembers para que todos os outros membros do grupo recebam a mensagem [SISTEMA] usuario entrou no grupo 'nomegrupo'.
+
+2. Entrega de convites pendentes ao login
+   Foi criado o metodo deliverPendingForUser em RequestService. Quando o usuario faz login ou muda status para ONLINE, o servidor:
+   - busca pedidos pendentes onde target_user_id = id do usuario;
+   - reenvia as mensagens de convite, pedido de mensagem direta, pedido de entrada em grupo e convite de administracao;
+   - usa os mesmos formatos enviados na hora original.
+   Esse metodo e chamado por CommandProcessor logo apos a entrega de mensagens pendentes.
+
+Pontos validados:
+
+- Administrador convida usuario existente para o grupo.
+- Convidado online recebe o convite imediatamente.
+- Convidado offline recebe o convite ao fazer login.
+- Convidado aceita e passa a aparecer em listargrupo &nomegrupo.
+- Grupo recebe aviso de entrada do novo membro.
+- Convidado recusa e nao entra no grupo.
+- Convite duplicado para o mesmo usuario nao e criado.
+- Usuario que ja e membro nao recebe convite e o sistema informa.
+- Usuario nao administrador nao consegue inserir ninguem no grupo e recebe erro.
+- O comando inserir aceita varios usuarios separados por virgula, criando um convite para cada um.
+
+
+ETAPA 13 - Enviar mensagem para grupo
+
+Nesta etapa foi validado o envio de mensagens publicas dentro de um grupo.
+
+Comando:
+
+&nomegrupo: mensagem
+
+Fluxo implementado:
+
+1. O CommandParser interpreta a linha como GROUP_MESSAGE, extraindo o nome do grupo e o conteudo apos os dois pontos.
+2. O CommandProcessor encaminha para MessageService.sendGroup.
+3. MessageService.sendGroup executa as verificacoes:
+   - usuario remetente esta logado e em estado que permite envio;
+   - o grupo existe na tabela groups_chat;
+   - o remetente e membro do grupo.
+4. A mensagem e salva em messages com message_type = GROUP e group_id apontando para o grupo.
+5. Para cada membro do grupo, exceto o remetente, o sistema:
+   - verifica se existe bloqueio entre o remetente e o membro; se houver, a entrega e ignorada e contada como "bloqueado";
+   - se o membro estiver online, entrega imediatamente com o formato [nomegrupo] usuario (data): mensagem e marca a entrega como concluida em message_deliveries;
+   - se o membro estiver offline, ausente ou ocupado, a entrega fica como pendente para ser entregue depois.
+6. O servidor responde ao remetente com um resumo: quantos receberam agora, quantos receberao depois e quantos foram bloqueados ou nao receberam.
+
+Pontos validados:
+
+- Membro envia mensagem ao grupo e todos os outros membros online recebem.
+- Remetente recebe confirmacao com a contagem de entregas.
+- Membro offline nao recebe na hora, mas recebe depois ao ficar online.
+- Bloqueio entre remetente e membro impede a entrega; demais membros nao bloqueados continuam recebendo.
+- Usuario que nao e membro do grupo nao consegue enviar para o grupo.
+
+
+ETAPA 14 - Mensagem direta dentro do grupo
+
+Nesta etapa foi validado o envio de mensagens privadas para um ou mais membros do grupo.
+
+Comandos:
+
+&nomegrupo@usuario: mensagem
+&nomegrupo@usuario1,@usuario2: mensagem
+
+Fluxo implementado:
+
+1. O CommandParser interpreta a linha como GROUP_DIRECT_MESSAGE, extraindo o nome do grupo, a lista de destinatarios e o conteudo da mensagem.
+2. O CommandProcessor encaminha para MessageService.sendGroupDirect.
+3. MessageService.sendGroupDirect executa as verificacoes:
+   - usuario remetente esta logado e em estado que permite envio;
+   - o grupo existe;
+   - o remetente e membro do grupo.
+4. Para cada destinatario informado, o sistema:
+   - busca o usuario pelo login;
+   - verifica se o destinatario e membro do grupo e nao e o proprio remetente;
+   - verifica bloqueio entre remetente e destinatario;
+   - salva a mensagem em messages com message_type = GROUP_DIRECT, group_id do grupo e receiver_user_id do destinatario;
+   - se o destinatario estiver online, entrega imediatamente com o formato [nomegrupo | privada] usuario (data): mensagem;
+   - se estiver offline, salva como entrega pendente.
+5. O servidor responde ao remetente informando quantos receberam agora, quantos receberao depois, quantos eram invalidos (nao membros, inexistentes ou o proprio remetente) e quantos foram bloqueados.
+
+Pontos validados:
+
+- Mensagem direta para um destinatario especifico do grupo: apenas ele recebe.
+- Mensagem direta para varios destinatarios separados por virgula: somente os destinatarios validos recebem.
+- Usuario fora do grupo nao pode ser destinatario; e contabilizado como invalido.
+- Bloqueio entre remetente e destinatario impede a entrega.
+- Destinatario offline recebe a mensagem quando ficar online.
+- O formato [nomegrupo | privada] permite ao destinatario diferenciar de mensagens publicas do grupo.
+
+
+ETAPA 15 - Solicitar entrada em grupo existente
+
+Nesta etapa foi validado e ajustado o fluxo de solicitacao de entrada em um grupo, no qual todos os membros atuais precisam aprovar a entrada de um novo participante.
+
+Comando:
+
+entrar &nomegrupo
+
+Regra do enunciado:
+
+Para um usuario entrar em um grupo existente, todos os membros atuais devem aceitar. Se qualquer membro recusar, a entrada e negada e as demais pendencias sao canceladas.
+
+Fluxo implementado:
+
+1. O CommandParser interpreta a linha como ENTRAR_GRUPO, extraindo o nome do grupo.
+2. O CommandProcessor encaminha para GroupService.requestJoin.
+3. GroupService.requestJoin executa as verificacoes:
+   - o grupo existe;
+   - o usuario ainda nao e membro do grupo;
+   - nao existe pedido de entrada pendente do mesmo usuario para o mesmo grupo.
+4. O sistema busca todos os membros atuais do grupo e cria, para cada um, um registro em pending_requests com request_type = GROUP_JOIN, requester_user_id = id do solicitante, target_user_id = id do membro e group_id do grupo.
+5. Para cada membro online, o servidor envia imediatamente:
+   [SOLICITACAO id] usuario quer entrar no grupo 'nomegrupo'. Use 'aceitar id' ou 'recusar id'.
+   Membros offline recebem a solicitacao ao ficar online, atraves de deliverPendingForUser.
+6. O servidor responde ao solicitante informando que o pedido foi enviado a todos os membros atuais.
+
+Aceite:
+
+- Quando um membro digita aceitar id, RequestService.accept executa acceptGroupJoin:
+  - marca o pedido daquele membro como ACCEPTED;
+  - consulta quantas aprovacoes ainda estao pendentes para o mesmo solicitante e grupo (countPendingGroupJoinApprovals);
+  - se ainda restarem aprovacoes pendentes, responde informando quantas faltam;
+  - se nao restarem, adiciona o solicitante em group_members, avisa o solicitante de que o pedido foi aceito por todos e avisa o grupo com a mensagem [SISTEMA] usuario entrou no grupo 'nomegrupo'.
+
+Recusa:
+
+- Quando um membro digita recusar id, RequestService.refuse executa:
+  - marca o pedido daquele membro como REFUSED;
+  - chama RequestRepository.refusePendingGroupJoinApprovals para marcar como REFUSED todas as demais solicitacoes pendentes do mesmo usuario para o mesmo grupo;
+  - avisa o solicitante de que seu pedido foi recusado.
+  Assim, basta uma recusa para encerrar todo o fluxo.
+
+Ajustes realizados nesta etapa:
+
+1. Notificacao do grupo ao aceite final
+   O metodo acceptGroupJoin no RequestService passou a chamar notifyGroupMembers apos confirmar que todas as aprovacoes ja foram coletadas. Todos os membros online recebem a mensagem de entrada do novo participante.
+
+2. Notificacao em segundo plano ao logar
+   Como cada membro pode estar offline no momento da solicitacao, o metodo deliverPendingForUser do RequestService reenvia o pedido de entrada quando o membro entra novamente. Assim, o requisito de mensagens offline tambem se aplica a esta etapa.
+
+Pontos validados:
+
+- Usuario solicita entrada e todos os membros recebem a solicitacao.
+- Apenas com a aprovacao de todos o usuario entra no grupo.
+- A entrada do usuario gera aviso para os demais membros.
+- Se um membro recusar, o solicitante e avisado e nao entra no grupo.
+- Solicitacoes restantes sao canceladas automaticamente apos a recusa.
+- Usuario ja membro nao pode solicitar entrada novamente e recebe erro.
+- Membro offline no momento do pedido recebe a solicitacao ao logar.
