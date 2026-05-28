@@ -33,6 +33,56 @@ public class RequestService {
         this.sender = sender;
     }
 
+    public void deliverPendingForUser(int userId) {
+        User user = userRepo.findById(userId);
+        if (user == null || !sender.isOnline(user.getLogin())) {
+            return;
+        }
+
+        java.util.List<PendingRequest> pendings = requestRepo.findPendingByTarget(userId);
+        for (PendingRequest req : pendings) {
+            String notification = formatPendingNotification(req);
+            if (notification != null) {
+                sender.sendToUser(user.getLogin(), notification);
+            }
+        }
+    }
+
+    private String formatPendingNotification(PendingRequest req) {
+        User requester = userRepo.findById(req.getRequesterUserId());
+        String requesterLogin = requester != null ? requester.getLogin() : "desconhecido";
+
+        switch (req.getRequestType()) {
+            case PERMISSION:
+                return ServerResponse.privateRequest(req.getId(),
+                        requesterLogin + " quer enviar uma mensagem direta para voce. Use 'aceitar " + req.getId()
+                                + "' ou 'recusar " + req.getId() + "'.");
+            case INVITE: {
+                Group group = req.getGroupId() != null ? groupRepo.findById(req.getGroupId()) : null;
+                String groupName = group != null ? group.getName() : "desconhecido";
+                return ServerResponse.invite(req.getId(),
+                        requesterLogin + " te convidou para o grupo '" + groupName + "'. Use 'aceitar " + req.getId()
+                                + "' ou 'recusar " + req.getId() + "'.");
+            }
+            case GROUP_JOIN: {
+                Group group = req.getGroupId() != null ? groupRepo.findById(req.getGroupId()) : null;
+                String groupName = group != null ? group.getName() : "desconhecido";
+                return ServerResponse.groupJoinRequest(req.getId(),
+                        requesterLogin + " quer entrar no grupo '" + groupName + "'. Use 'aceitar " + req.getId()
+                                + "' ou 'recusar " + req.getId() + "'.");
+            }
+            case ADMIN_PROMOTION: {
+                Group group = req.getGroupId() != null ? groupRepo.findById(req.getGroupId()) : null;
+                String groupName = group != null ? group.getName() : "desconhecido";
+                return ServerResponse.invite(req.getId(),
+                        requesterLogin + " quer tornar voce administrador do grupo '" + groupName
+                                + "'. Use 'aceitar " + req.getId() + "' ou 'recusar " + req.getId() + "'.");
+            }
+            default:
+                return null;
+        }
+    }
+
     public String accept(int userId, int requestId) {
         PendingRequest req = requestRepo.findById(requestId);
 
@@ -180,12 +230,16 @@ public class RequestService {
         User requester = userRepo.findById(req.getRequesterUserId());
         String requesterLogin = requester != null ? requester.getLogin() : "desconhecido";
 
+        User target = userRepo.findById(req.getTargetUserId());
+        String targetLogin = target != null ? target.getLogin() : "desconhecido";
+
         if (sender.isOnline(requesterLogin)) {
-            User target = userRepo.findById(req.getTargetUserId());
-            String targetLogin = target != null ? target.getLogin() : "desconhecido";
             sender.sendToUser(requesterLogin,
                     ServerResponse.system(targetLogin + " aceitou o convite para o grupo '" + group.getName() + "'."));
         }
+
+        notifyGroupMembers(group.getId(), req.getTargetUserId(),
+                ServerResponse.system(targetLogin + " entrou no grupo '" + group.getName() + "'."));
 
         return ServerResponse.ok("Voce entrou no grupo '" + group.getName() + "'.");
     }
@@ -219,8 +273,23 @@ public class RequestService {
                             .system("Seu pedido para entrar no grupo '" + group.getName() + "' foi aceito por todos."));
         }
 
+        notifyGroupMembers(group.getId(), req.getRequesterUserId(),
+                ServerResponse.system(requesterLogin + " entrou no grupo '" + group.getName() + "'."));
+
         return ServerResponse
                 .ok("Todos aceitaram. " + requesterLogin + " agora e membro do grupo '" + group.getName() + "'.");
+    }
+
+    private void notifyGroupMembers(int groupId, int exceptUserId, String message) {
+        java.util.List<User> members = groupRepo.listMembers(groupId);
+        for (User member : members) {
+            if (member.getId() == exceptUserId) {
+                continue;
+            }
+            if (sender.isOnline(member.getLogin())) {
+                sender.sendToUser(member.getLogin(), message);
+            }
+        }
     }
 
     private String acceptAdminPromotion(PendingRequest req) {

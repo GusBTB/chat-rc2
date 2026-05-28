@@ -240,6 +240,7 @@ public class CommandProcessor {
         clientHandler.setLoggedUser(user);
         sessionManager.add(user.getId(), user.getLogin(), clientHandler);
         userService.deliverPendingMessages(user);
+        requestService.deliverPendingForUser(user.getId());
 
         return ServerResponse.ok("Login realizado com sucesso. Usuario atual: " + user.getLogin() + ".");
     }
@@ -272,6 +273,7 @@ public class CommandProcessor {
             User user = userRepo.findById(userId);
             if (user != null) {
                 userService.deliverPendingMessages(user);
+                requestService.deliverPendingForUser(userId);
             }
         } else {
             sessionManager.remove(userId, login);
@@ -318,27 +320,28 @@ public class CommandProcessor {
     }
 
     private String help() {
-        return "Comandos disponiveis:\n"
-                + "  cadastro;Nome Completo;login;email;senha\n"
-                + "  login;login;senha\n"
-                + "  logout\n"
-                + "  recuperarsenha;email\n"
-                + "  status;ONLINE|OFFLINE|OCUPADO|AUSENTE\n"
-                + "  listausuarios\n"
-                + "  listagrupos\n"
-                + "  listargrupo &nomegrupo\n"
-                + "  @usuario: mensagem\n"
-                + "  novogrupo nomegrupo\n"
-                + "  inserir &nomegrupo@usuario1,@usuario2\n"
-                + "  entrar &nomegrupo\n"
-                + "  &nomegrupo: mensagem\n"
-                + "  &nomegrupo@usuario1,@usuario2: mensagem\n"
-                + "  promover &nomegrupo@usuario\n"
-                + "  sair &nomegrupo\n"
-                + "  bloquear @usuario\n"
-                + "  desbloquear @usuario\n"
-                + "  aceitar id\n"
-                + "  recusar id";
+        return """
+                Comandos disponiveis:
+                  cadastro;Nome Completo;login;email;senha
+                  login;login;senha
+                  logout
+                  recuperarsenha;email
+                  status;ONLINE|OFFLINE|OCUPADO|AUSENTE
+                  listausuarios
+                  listagrupos
+                  listargrupo &nomegrupo
+                  @usuario: mensagem
+                  novogrupo nomegrupo
+                  inserir &nomegrupo@usuario1,@usuario2
+                  entrar &nomegrupo
+                  &nomegrupo: mensagem
+                  &nomegrupo@usuario1,@usuario2: mensagem
+                  promover &nomegrupo@usuario
+                  sair &nomegrupo
+                  bloquear @usuario
+                  desbloquear @usuario
+                  aceitar id
+                  recusar id""";
     }
 
     private String buildUnknownCommandMessage(String line, String originalErrorMessage) {
